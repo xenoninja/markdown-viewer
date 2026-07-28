@@ -1,4 +1,4 @@
-use mdview::{BlockKind, Document, HeadingLevel, ListMarker};
+use mdview::{BlockKind, Document, HeadingLevel, ListItemContent, ListMarker};
 
 #[test]
 fn headings_and_inline_formatting_keep_meaning_without_authoring_markers() {
@@ -52,6 +52,7 @@ fn ordered_unordered_nested_and_task_lists_keep_hierarchy_and_markers() {
                 depth: 1,
                 marker: ListMarker::Ordered(3),
                 continuation: false,
+                content: ListItemContent::Paragraph,
             },
             "first",
         ),
@@ -60,6 +61,7 @@ fn ordered_unordered_nested_and_task_lists_keep_hierarchy_and_markers() {
                 depth: 1,
                 marker: ListMarker::Ordered(4),
                 continuation: false,
+                content: ListItemContent::Paragraph,
             },
             "second",
         ),
@@ -68,6 +70,7 @@ fn ordered_unordered_nested_and_task_lists_keep_hierarchy_and_markers() {
                 depth: 2,
                 marker: ListMarker::Unordered,
                 continuation: false,
+                content: ListItemContent::Paragraph,
             },
             "nested",
         ),
@@ -79,6 +82,7 @@ fn ordered_unordered_nested_and_task_lists_keep_hierarchy_and_markers() {
                     number: None,
                 },
                 continuation: false,
+                content: ListItemContent::Paragraph,
             },
             "complete",
         ),
@@ -90,6 +94,7 @@ fn ordered_unordered_nested_and_task_lists_keep_hierarchy_and_markers() {
                     number: None,
                 },
                 continuation: false,
+                content: ListItemContent::Paragraph,
             },
             "pending",
         ),
@@ -201,6 +206,7 @@ fn list_item_continuations_keep_their_parent_hierarchy() {
             depth: 1,
             marker: ListMarker::Unordered,
             continuation: false,
+            content: ListItemContent::Paragraph,
         }
     );
     assert_eq!(
@@ -209,8 +215,53 @@ fn list_item_continuations_keep_their_parent_hierarchy() {
             depth: 1,
             marker: ListMarker::Unordered,
             continuation: true,
+            content: ListItemContent::Paragraph,
         }
     );
     assert_eq!(document.blocks()[0].text(), "first paragraph");
     assert_eq!(document.blocks()[1].text(), "continuation paragraph");
+}
+
+#[test]
+fn supported_blocks_and_empty_parents_keep_list_context() {
+    let document = Document::parse("- # Nested heading\n- ***\n-\n  - child\n");
+
+    assert_eq!(
+        document.blocks()[0].kind(),
+        BlockKind::ListItem {
+            depth: 1,
+            marker: ListMarker::Unordered,
+            continuation: false,
+            content: ListItemContent::Heading(HeadingLevel::H1),
+        }
+    );
+    assert_eq!(document.blocks()[0].text(), "Nested heading");
+    assert_eq!(
+        document.blocks()[1].kind(),
+        BlockKind::ListItem {
+            depth: 1,
+            marker: ListMarker::Unordered,
+            continuation: false,
+            content: ListItemContent::ThematicBreak,
+        }
+    );
+    assert_eq!(
+        document.blocks()[2].kind(),
+        BlockKind::ListItem {
+            depth: 1,
+            marker: ListMarker::Unordered,
+            continuation: false,
+            content: ListItemContent::Empty,
+        }
+    );
+    assert_eq!(
+        document.blocks()[3].kind(),
+        BlockKind::ListItem {
+            depth: 2,
+            marker: ListMarker::Unordered,
+            continuation: false,
+            content: ListItemContent::Paragraph,
+        }
+    );
+    assert_eq!(document.blocks()[3].text(), "child");
 }

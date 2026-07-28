@@ -6,7 +6,9 @@ mod terminal;
 mod ui;
 
 pub use app::{Command, Harness, ReadingSession};
-pub use document::{Block, BlockKind, Document, HeadingLevel, InlineSpan, InlineStyle, ListMarker};
+pub use document::{
+    Block, BlockKind, Document, HeadingLevel, InlineSpan, InlineStyle, ListItemContent, ListMarker,
+};
 pub use layout::{
     CellLocation, CellStyle, RenderedDocument, RenderedRow, SemanticPosition, layout,
 };

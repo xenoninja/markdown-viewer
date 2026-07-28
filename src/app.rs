@@ -509,44 +509,34 @@ impl Harness {
 
     #[must_use]
     pub fn cursor_cell(&self) -> Option<CellLocation> {
+        self.screen_cell(self.session.cursor()?)
+    }
+
+    #[must_use]
+    pub fn cursor_is_highlighted(&self) -> bool {
+        self.cursor()
+            .and_then(|cursor| self.modifier_at(cursor))
+            .is_some_and(|modifier| modifier.contains(Modifier::REVERSED))
+    }
+
+    #[must_use]
+    pub fn modifier_at(&self, position: SemanticPosition) -> Option<Modifier> {
+        let location = self.screen_cell(position)?;
+        let column = u16::try_from(location.column).ok()?;
+        let row = u16::try_from(location.row).ok()?;
+        Some(self.terminal.backend().buffer()[(column, row)].modifier)
+    }
+
+    fn screen_cell(&self, position: SemanticPosition) -> Option<CellLocation> {
         let area = self.terminal.backend().buffer().area;
-        let mut location = layout(self.session.document(), area.width)
-            .cell_for_position(self.session.cursor()?)?;
+        let mut location =
+            layout(self.session.document(), area.width).cell_for_position(position)?;
         let screen_row = location.row.checked_sub(self.session.viewport())?;
         if screen_row >= usize::from(area.height) {
             return None;
         }
         location.row = screen_row;
         Some(location)
-    }
-
-    #[must_use]
-    pub fn cursor_is_highlighted(&self) -> bool {
-        let Some(location) = self.cursor_cell() else {
-            return false;
-        };
-        let Ok(column) = u16::try_from(location.column) else {
-            return false;
-        };
-        let Ok(row) = u16::try_from(location.row) else {
-            return false;
-        };
-        self.terminal.backend().buffer()[(column, row)]
-            .modifier
-            .contains(Modifier::REVERSED)
-    }
-
-    #[must_use]
-    pub fn modifier_at(&self, position: SemanticPosition) -> Option<Modifier> {
-        let area = self.terminal.backend().buffer().area;
-        let location = layout(self.session.document(), area.width).cell_for_position(position)?;
-        let row = location.row.checked_sub(self.session.viewport())?;
-        if row >= usize::from(area.height) {
-            return None;
-        }
-        let column = u16::try_from(location.column).ok()?;
-        let row = u16::try_from(row).ok()?;
-        Some(self.terminal.backend().buffer()[(column, row)].modifier)
     }
 
     #[must_use]

@@ -17,9 +17,54 @@ pub enum BlockKind {
         depth: usize,
         marker: ListMarker,
         continuation: bool,
+        content: ListItemContent,
     },
     ThematicBreak,
     RawHtml,
+}
+
+/// The supported block role carried by a list item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListItemContent {
+    Paragraph,
+    Heading(HeadingLevel),
+    ThematicBreak,
+    RawHtml,
+    Empty,
+}
+
+impl BlockKind {
+    pub(crate) fn heading_level(self) -> Option<HeadingLevel> {
+        match self {
+            Self::Heading(level)
+            | Self::ListItem {
+                content: ListItemContent::Heading(level),
+                ..
+            } => Some(level),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_thematic_break(self) -> bool {
+        matches!(
+            self,
+            Self::ThematicBreak
+                | Self::ListItem {
+                    content: ListItemContent::ThematicBreak,
+                    ..
+                }
+        )
+    }
+
+    pub(crate) fn is_empty_list_item(self) -> bool {
+        matches!(
+            self,
+            Self::ListItem {
+                content: ListItemContent::Empty,
+                ..
+            }
+        )
+    }
 }
 
 /// A Markdown heading's declared level.
@@ -149,17 +194,33 @@ impl Document {
                     }
                 }
                 Event::Start(Tag::Heading { level, .. }) => {
-                    builder = Some(BlockBuilder::new(
-                        BlockKind::Heading(heading_level(level)),
-                        quote_depth,
-                    ));
+                    let level = heading_level(level);
+                    builder = Some(if items.is_empty() {
+                        BlockBuilder::new(BlockKind::Heading(level), quote_depth)
+                    } else {
+                        block_builder_for_item(
+                            &mut items,
+                            quote_depth,
+                            ListItemContent::Heading(level),
+                        )
+                    });
                 }
                 Event::Start(Tag::HtmlBlock) => {
-                    builder = Some(BlockBuilder::new(BlockKind::RawHtml, quote_depth));
+                    builder = Some(if items.is_empty() {
+                        BlockBuilder::new(BlockKind::RawHtml, quote_depth)
+                    } else {
+                        block_builder_for_item(&mut items, quote_depth, ListItemContent::RawHtml)
+                    });
                 }
                 Event::Start(Tag::BlockQuote(_)) => quote_depth += 1,
                 Event::Start(Tag::List(start)) => {
                     finish_builder(&mut builder, &mut blocks);
+                    if items.last().is_some_and(|item| !item.started) {
+                        blocks.push(
+                            block_builder_for_item(&mut items, quote_depth, ListItemContent::Empty)
+                                .finish(),
+                        );
+                    }
                     lists.push(ListContext { next_number: start });
                 }
                 Event::Start(Tag::Item) => {
@@ -218,6 +279,12 @@ impl Document {
                 Event::End(TagEnd::BlockQuote(_)) => quote_depth = quote_depth.saturating_sub(1),
                 Event::End(TagEnd::Item) => {
                     finish_builder(&mut builder, &mut blocks);
+                    if items.last().is_some_and(|item| !item.started) {
+                        blocks.push(
+                            block_builder_for_item(&mut items, quote_depth, ListItemContent::Empty)
+                                .finish(),
+                        );
+                    }
                     items.pop();
                 }
                 Event::End(TagEnd::List(_)) => {
@@ -235,7 +302,16 @@ impl Document {
                 }
                 Event::Rule => {
                     finish_builder(&mut builder, &mut blocks);
-                    blocks.push(BlockBuilder::new(BlockKind::ThematicBreak, quote_depth).finish());
+                    let rule = if items.is_empty() {
+                        BlockBuilder::new(BlockKind::ThematicBreak, quote_depth)
+                    } else {
+                        block_builder_for_item(
+                            &mut items,
+                            quote_depth,
+                            ListItemContent::ThematicBreak,
+                        )
+                    };
+                    blocks.push(rule.finish());
                 }
                 _ => {}
             }
@@ -322,20 +398,30 @@ impl ListMarker {
 }
 
 fn block_builder_for_leaf(items: &mut [ItemContext], quote_depth: usize) -> BlockBuilder {
-    if let Some(item) = items.last_mut() {
-        let continuation = item.started;
-        item.started = true;
-        return BlockBuilder::new(
-            BlockKind::ListItem {
-                depth: item.depth,
-                marker: item.marker,
-                continuation,
-            },
-            quote_depth,
-        );
+    if !items.is_empty() {
+        return block_builder_for_item(items, quote_depth, ListItemContent::Paragraph);
     }
 
     BlockBuilder::new(BlockKind::Paragraph, quote_depth)
+}
+
+fn block_builder_for_item(
+    items: &mut [ItemContext],
+    quote_depth: usize,
+    content: ListItemContent,
+) -> BlockBuilder {
+    let item = items.last_mut().expect("list content is inside an item");
+    let continuation = item.started;
+    item.started = true;
+    BlockBuilder::new(
+        BlockKind::ListItem {
+            depth: item.depth,
+            marker: item.marker,
+            continuation,
+            content,
+        },
+        quote_depth,
+    )
 }
 
 fn finish_builder(builder: &mut Option<BlockBuilder>, blocks: &mut Vec<Block>) {

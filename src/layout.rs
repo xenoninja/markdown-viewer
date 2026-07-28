@@ -68,13 +68,10 @@ impl CellStyle {
 
     fn from_semantics(kind: BlockKind, inline: InlineStyle, link: bool) -> Self {
         Self {
-            heading_level: match kind {
-                BlockKind::Heading(level) => Some(level),
-                _ => None,
-            },
+            heading_level: kind.heading_level(),
             inline,
             link,
-            thematic_break: kind == BlockKind::ThematicBreak,
+            thematic_break: kind.is_thematic_break(),
         }
     }
 }
@@ -267,8 +264,19 @@ pub fn layout(document: &Document, width: u16) -> RenderedDocument {
         let leading = block_leading(block);
         let leading_width = UnicodeWidthStr::width(leading.as_str());
         let block_width = content_width.saturating_sub(leading_width).max(1);
-        if block.kind() == BlockKind::ThematicBreak {
-            layout_thematic_break(block_index, block_width, base_column, leading, &mut rows);
+        if block.kind().is_thematic_break() {
+            layout_thematic_break(
+                block.kind(),
+                block_index,
+                block_width,
+                base_column,
+                leading,
+                &mut rows,
+            );
+            continue;
+        }
+        if block.kind().is_empty_list_item() {
+            layout_empty_list_item(block, block_index, base_column, &mut rows);
             continue;
         }
         let column = base_column + leading_width;
@@ -287,6 +295,7 @@ fn block_leading(block: &Block) -> String {
         depth,
         marker,
         continuation,
+        ..
     } = block.kind()
     {
         leading.push_str(&"  ".repeat(depth.saturating_sub(1)));
@@ -316,6 +325,7 @@ fn list_marker(marker: ListMarker) -> String {
 }
 
 fn layout_thematic_break(
+    kind: BlockKind,
     block: usize,
     width: usize,
     base_column: usize,
@@ -330,11 +340,36 @@ fn layout_thematic_break(
             symbol: "─".to_owned(),
             position: SemanticPosition { block, grapheme: 0 },
             width: 1,
-            style: CellStyle::from_semantics(
-                BlockKind::ThematicBreak,
-                InlineStyle::default(),
-                false,
-            ),
+            style: CellStyle::from_semantics(kind, InlineStyle::default(), false),
+            link_target: None,
+        }],
+        column,
+        leading,
+    });
+}
+
+fn layout_empty_list_item(
+    block: &Block,
+    block_index: usize,
+    base_column: usize,
+    rows: &mut Vec<RenderedRow>,
+) {
+    let BlockKind::ListItem { depth, marker, .. } = block.kind() else {
+        unreachable!("empty list content belongs to a list item");
+    };
+    let mut leading = "│ ".repeat(block.quote_depth());
+    leading.push_str(&"  ".repeat(depth.saturating_sub(1)));
+    let symbol = list_marker(marker).trim_end().to_owned();
+    let column = base_column + UnicodeWidthStr::width(leading.as_str());
+    rows.push(RenderedRow {
+        cells: vec![RenderedCell {
+            width: UnicodeWidthStr::width(symbol.as_str()),
+            symbol,
+            position: SemanticPosition {
+                block: block_index,
+                grapheme: 0,
+            },
+            style: CellStyle::from_semantics(block.kind(), InlineStyle::default(), false),
             link_target: None,
         }],
         column,

@@ -182,6 +182,33 @@ fn list_continuation_and_thematic_decorations_are_not_cursor_cells() {
     }
 }
 
+#[test]
+fn supported_blocks_inside_lists_keep_layout_hierarchy() {
+    let document = Document::parse("- # Nested heading\n- ***\n-\n  - child\n");
+    let rendered = layout(&document, 40);
+    let rows = rendered
+        .rows()
+        .iter()
+        .map(mdview::RenderedRow::text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rows, ["• Nested heading", "• ────────", "•", "  • child",]);
+    assert_eq!(
+        rendered.rows()[0].cells()[0].style().heading_level(),
+        Some(HeadingLevel::H1)
+    );
+    assert_eq!(
+        rendered.rows()[1].cells().len(),
+        1,
+        "list thematic break has one semantic anchor"
+    );
+    assert_eq!(
+        rendered.rows()[2].cells().len(),
+        1,
+        "empty parent list item remains cursor-reachable"
+    );
+}
+
 fn reachable_positions(rendered: &mdview::RenderedDocument) -> BTreeSet<SemanticPosition> {
     rendered
         .rows()
