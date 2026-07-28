@@ -13,6 +13,11 @@ use crate::source::{SourceError, load_document};
 use crate::ui;
 use crate::{BlockKind, Document, HeadingLevel};
 
+const MIN_OUTLINE_WIDTH: u16 = 16;
+const MAX_OUTLINE_WIDTH: u16 = 40;
+const MIN_DOCUMENT_PANE_WIDTH: u16 = 32;
+const PANE_DIVIDER_WIDTH: u16 = 1;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
     Quit,
@@ -29,6 +34,14 @@ pub(crate) struct OutlineEntry {
     pub(crate) position: SemanticPosition,
     pub(crate) level: HeadingLevel,
     pub(crate) label: String,
+    collapsed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutlineBranchState {
+    Leaf,
+    Collapsed,
+    Expanded,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +89,7 @@ pub struct ReadingSession {
     document: Document,
     cursor: Option<SemanticPosition>,
     outline: Vec<OutlineEntry>,
+    outline_enabled: bool,
     outline_selection: Option<usize>,
     outline_viewport: usize,
     focus: PaneFocus,
@@ -110,6 +124,7 @@ impl ReadingSession {
                     position: SemanticPosition { block, grapheme: 0 },
                     level,
                     label: outline_label(content),
+                    collapsed: false,
                 })
             })
             .collect::<Vec<_>>();
@@ -119,6 +134,7 @@ impl ReadingSession {
             document,
             cursor,
             outline,
+            outline_enabled: true,
             outline_selection,
             outline_viewport: 0,
             focus: PaneFocus::Document,
@@ -140,11 +156,11 @@ impl ReadingSession {
         }
     }
 
-    pub fn key(&mut self, key: KeyEvent, width: u16, height: u16) {
-        let height = self.content_height(height);
+    pub fn key(&mut self, key: KeyEvent, width: u16, screen_height: u16) {
+        let height = self.content_height(screen_height);
         if key.code == KeyCode::Esc {
             self.focus = PaneFocus::Document;
-            self.ensure_outline_context_visible(height);
+            self.ensure_outline_context_visible(self.content_height(screen_height));
             self.clear_pending();
             return;
         }
@@ -159,7 +175,7 @@ impl ReadingSession {
 
         if key.code == KeyCode::Enter {
             if self.focus == PaneFocus::Outline {
-                self.activate_outline_selection(width, height);
+                self.activate_outline_selection(width, screen_height);
             }
             self.clear_pending();
             return;
@@ -168,13 +184,13 @@ impl ReadingSession {
         if self.pending_control_w {
             self.pending_control_w = false;
             match key.code {
-                KeyCode::Char('h') if !self.outline.is_empty() => {
+                KeyCode::Char('h') if self.outline_is_visible(width) => {
                     self.focus = PaneFocus::Outline;
                 }
                 KeyCode::Char('l') => self.focus = PaneFocus::Document,
                 _ => {}
             }
-            self.ensure_outline_context_visible(height);
+            self.ensure_outline_context_visible(self.content_height(screen_height));
             self.clear_pending();
             return;
         }
@@ -229,11 +245,17 @@ impl ReadingSession {
 
         let supplied_count = self.pending_count.take();
         let count = supplied_count.unwrap_or(1).max(1);
+        if character == 'o' {
+            self.toggle_outline(width, screen_height);
+            return;
+        }
         if self.focus == PaneFocus::Outline {
             match character {
                 'q' => self.command(Command::Quit),
                 'j' => self.move_outline_selection(count, true, height),
                 'k' => self.move_outline_selection(count, false, height),
+                'h' => self.set_outline_branch_collapsed(true, height),
+                'l' => self.set_outline_branch_collapsed(false, height),
                 _ => self.clear_pending(),
             }
             return;
@@ -299,6 +321,9 @@ impl ReadingSession {
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
+        if !self.outline_is_visible(width) {
+            self.focus = PaneFocus::Document;
+        }
         let height = self.content_height(height);
         self.ensure_outline_context_visible(height);
         if let Some(cursor) = self.cursor {
@@ -357,12 +382,46 @@ impl ReadingSession {
             .map(|warning| warning.message())
     }
 
+    pub(crate) fn status_text(&self) -> Option<&str> {
+        if self.focus == PaneFocus::Outline {
+            self.outline_selection
+                .and_then(|selection| self.outline.get(selection))
+                .map(|entry| entry.label.as_str())
+        } else {
+            self.status_warning()
+        }
+    }
+
     pub(crate) fn content_height(&self, screen_height: u16) -> u16 {
-        screen_height.saturating_sub(u16::from(self.status_warning().is_some()))
+        screen_height.saturating_sub(u16::from(self.status_text().is_some()))
     }
 
     pub(crate) fn outline(&self) -> &[OutlineEntry] {
         &self.outline
+    }
+
+    pub(crate) fn visible_outline_indices(&self) -> Vec<usize> {
+        let current_path = self.current_section_path();
+        let mut collapsed_ancestors = Vec::new();
+        let mut visible = Vec::with_capacity(self.outline.len());
+
+        for (index, entry) in self.outline.iter().enumerate() {
+            let depth = entry.level.depth();
+            while collapsed_ancestors
+                .last()
+                .is_some_and(|ancestor_depth| *ancestor_depth >= depth)
+            {
+                collapsed_ancestors.pop();
+            }
+            if collapsed_ancestors.is_empty() || current_path[index] {
+                visible.push(index);
+            }
+            if entry.collapsed {
+                collapsed_ancestors.push(depth);
+            }
+        }
+
+        visible
     }
 
     pub(crate) fn outline_viewport(&self) -> usize {
@@ -370,7 +429,7 @@ impl ReadingSession {
     }
 
     pub(crate) fn pane_layout(&self, screen_width: u16) -> PaneLayout {
-        if self.outline.is_empty() {
+        if !self.outline_is_visible(screen_width) {
             return PaneLayout {
                 outline_width: 0,
                 document_x: 0,
@@ -378,13 +437,38 @@ impl ReadingSession {
             };
         }
 
-        let outline_width = (screen_width / 3).max(1);
-        let document_x = outline_width.saturating_add(1).min(screen_width);
+        let outline_width = (screen_width / 3).clamp(MIN_OUTLINE_WIDTH, MAX_OUTLINE_WIDTH);
+        let document_x = outline_width
+            .saturating_add(PANE_DIVIDER_WIDTH)
+            .min(screen_width);
         PaneLayout {
             outline_width,
             document_x,
             document_width: screen_width.saturating_sub(document_x).max(1),
         }
+    }
+
+    fn outline_is_visible(&self, screen_width: u16) -> bool {
+        !self.outline.is_empty()
+            && self.outline_enabled
+            && screen_width
+                >= MIN_OUTLINE_WIDTH
+                    .saturating_add(PANE_DIVIDER_WIDTH)
+                    .saturating_add(MIN_DOCUMENT_PANE_WIDTH)
+    }
+
+    fn toggle_outline(&mut self, width: u16, screen_height: u16) {
+        self.outline_enabled = !self.outline_enabled;
+        if !self.outline_is_visible(width) {
+            self.focus = PaneFocus::Document;
+        }
+        let height = self.content_height(screen_height);
+        if let Some(cursor) = self.cursor {
+            self.ensure_horizontal_cursor_visible(width, cursor);
+        }
+        let rendered = self.rendered(width);
+        self.ensure_cursor_visible(&rendered, height);
+        self.ensure_outline_context_visible(height);
     }
 
     fn control(&mut self, character: char, width: u16, height: u16) {
@@ -411,7 +495,7 @@ impl ReadingSession {
         }
     }
 
-    fn activate_outline_selection(&mut self, width: u16, height: u16) {
+    fn activate_outline_selection(&mut self, width: u16, screen_height: u16) {
         let Some(target) = self.outline_selection() else {
             return;
         };
@@ -419,6 +503,7 @@ impl ReadingSession {
             self.jump_history.record(cursor);
         }
         self.focus = PaneFocus::Document;
+        let height = self.content_height(screen_height);
         self.move_cursor_to(target, width, height);
     }
 
@@ -599,17 +684,82 @@ impl ReadingSession {
         let Some(selection) = self.outline_selection else {
             return;
         };
-        self.outline_selection = Some(if forward {
-            selection
-                .saturating_add(count)
-                .min(self.outline.len().saturating_sub(1))
+        let visible = self.visible_outline_indices();
+        let Some(row) = visible.iter().position(|index| *index == selection) else {
+            return;
+        };
+        let target = if forward {
+            row.saturating_add(count)
+                .min(visible.len().saturating_sub(1))
         } else {
-            selection.saturating_sub(count)
-        });
+            row.saturating_sub(count)
+        };
+        self.outline_selection = visible.get(target).copied();
         self.ensure_outline_context_visible(height);
     }
 
+    fn set_outline_branch_collapsed(&mut self, collapsed: bool, height: u16) {
+        let Some(selection) = self.outline_selection else {
+            return;
+        };
+        if self.outline_is_branch(selection) {
+            self.outline[selection].collapsed = collapsed;
+        }
+        self.ensure_outline_context_visible(height);
+    }
+
+    fn outline_is_branch(&self, index: usize) -> bool {
+        self.outline
+            .get(index + 1)
+            .is_some_and(|next| next.level.depth() > self.outline[index].level.depth())
+    }
+
+    pub(crate) fn outline_branch_state(&self, index: usize) -> OutlineBranchState {
+        if !self.outline_is_branch(index) {
+            OutlineBranchState::Leaf
+        } else if self.outline[index].collapsed {
+            OutlineBranchState::Collapsed
+        } else {
+            OutlineBranchState::Expanded
+        }
+    }
+
+    fn current_section_path(&self) -> Vec<bool> {
+        let mut path = vec![false; self.outline.len()];
+        let Some(mut index) = self.current_section().and_then(|section| {
+            self.outline
+                .iter()
+                .position(|entry| entry.position == section)
+        }) else {
+            return path;
+        };
+
+        loop {
+            path[index] = true;
+            let depth = self.outline[index].level.depth();
+            let Some(parent) = (0..index)
+                .rev()
+                .find(|candidate| self.outline[*candidate].level.depth() < depth)
+            else {
+                break;
+            };
+            index = parent;
+        }
+        path
+    }
+
     fn ensure_outline_context_visible(&mut self, height: u16) {
+        let visible = self.visible_outline_indices();
+        if let Some(selection) = self.outline_selection
+            && !visible.contains(&selection)
+        {
+            self.outline_selection = visible
+                .iter()
+                .rev()
+                .find(|index| **index < selection)
+                .copied()
+                .or_else(|| visible.first().copied());
+        }
         let target = match self.focus {
             PaneFocus::Outline => self.outline_selection,
             PaneFocus::Document => self.current_section().and_then(|section| {
@@ -622,8 +772,12 @@ impl ReadingSession {
             self.outline_viewport = 0;
             return;
         };
+        let Some(target) = visible.iter().position(|index| *index == target) else {
+            self.outline_viewport = 0;
+            return;
+        };
         let height = usize::from(height.max(1));
-        let maximum = self.outline.len().saturating_sub(height);
+        let maximum = visible.len().saturating_sub(height);
         self.outline_viewport = self.outline_viewport.min(maximum);
         if target < self.outline_viewport {
             self.outline_viewport = target;
@@ -980,15 +1134,20 @@ impl Harness {
 
     #[must_use]
     pub fn outline_modifier_at(&self, position: SemanticPosition) -> Option<Modifier> {
-        let row = self
+        let index = self
             .session
             .outline()
             .iter()
             .position(|entry| entry.position == position)?;
+        let row = self
+            .session
+            .visible_outline_indices()
+            .iter()
+            .position(|candidate| *candidate == index)?;
         let row = row.checked_sub(self.session.outline_viewport())?;
         let row = u16::try_from(row).ok()?;
         let buffer = self.terminal.backend().buffer();
-        if row >= buffer.area.height {
+        if row >= self.session.content_height(buffer.area.height) {
             return None;
         }
         Some(buffer[(0, row)].modifier)

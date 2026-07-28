@@ -71,6 +71,19 @@ pub enum HeadingLevel {
     H6,
 }
 
+impl HeadingLevel {
+    pub(crate) const fn depth(self) -> usize {
+        match self {
+            Self::H1 => 1,
+            Self::H2 => 2,
+            Self::H3 => 3,
+            Self::H4 => 4,
+            Self::H5 => 5,
+            Self::H6 => 6,
+        }
+    }
+}
+
 /// The meaningful marker attached to a list item.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ListMarker {

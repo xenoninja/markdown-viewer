@@ -15,9 +15,9 @@ fn outline_shows_declared_hierarchy_without_claiming_pre_heading_content() {
         .filter_map(|line| line.split_once('│').map(|(outline, _)| outline.trim_end()))
         .collect::<Vec<_>>();
 
-    assert_eq!(outline[0], "Parent");
-    assert_eq!(outline[1], "    Deep child");
-    assert_eq!(outline[2], "  Sibling");
+    assert_eq!(outline[0], "▾ Parent");
+    assert_eq!(outline[1], "      Deep child");
+    assert_eq!(outline[2], "    Sibling");
     assert_eq!(harness.current_section(), None);
     assert_eq!(
         harness.outline_selection(),
@@ -224,6 +224,169 @@ fn outline_uses_image_alt_text_in_readable_heading_labels() {
         .map(|(outline, _)| outline.trim_end())
         .expect("Outline divider");
 
-    assert_eq!(outline_label, "System architecture overview");
+    assert_eq!(outline_label, "  System architecture overview");
     assert!(!outline_label.contains('\u{fffc}'));
+}
+
+#[test]
+fn folded_branch_keeps_the_current_section_ancestry_visible() {
+    let document =
+        Document::parse("# Parent\n\n## Hidden child\n\n## Path child\n\n### Current section\n");
+    let mut harness = Harness::new(document, 60, 8);
+    let parent = SemanticPosition {
+        block: 0,
+        grapheme: 0,
+    };
+    let current = SemanticPosition {
+        block: 3,
+        grapheme: 0,
+    };
+    harness.keys("3}");
+    harness.control('w');
+    harness.keys("hh");
+
+    let folded = outline_text(&harness.frame());
+    assert!(folded.contains("▸ Parent"));
+    assert!(folded.contains("Parent"));
+    assert!(!folded.contains("Hidden child"));
+    assert!(folded.contains("Path child"));
+    assert!(folded.contains("Current secti…"));
+    assert_eq!(harness.current_section(), Some(current));
+    assert_eq!(harness.outline_selection(), Some(parent));
+
+    harness.keys("l");
+
+    let expanded = outline_text(&harness.frame());
+    assert!(expanded.contains("▾ Parent"));
+    assert!(expanded.contains("Hidden child"));
+}
+
+#[test]
+fn narrow_terminal_auto_hides_the_outline_until_width_recovers() {
+    let document = Document::parse("# Heading\n\nabcdefghijklmnop\n");
+    let mut harness = Harness::new(document, 24, 4);
+    harness.keys("}5l");
+    let cursor = harness.cursor();
+
+    assert!(!harness.frame().contains('│'));
+    assert!(harness.frame().contains("abcdefghijklmnop"));
+
+    harness.resize(60, 4);
+
+    assert!(harness.frame().contains('│'));
+    assert_eq!(harness.cursor(), cursor);
+}
+
+#[test]
+fn outline_toggle_changes_pane_visibility_without_moving_the_reading_cursor() {
+    let document = Document::parse("# Heading\n\nabcdefgh\n");
+    let mut harness = Harness::new(document, 60, 4);
+    harness.keys("}3l");
+    let cursor = harness.cursor();
+
+    harness.keys("o");
+
+    assert!(!harness.frame().contains('│'));
+    assert_eq!(harness.cursor(), cursor);
+
+    harness.keys("o");
+
+    assert!(harness.frame().contains('│'));
+    assert_eq!(harness.cursor(), cursor);
+}
+
+#[test]
+fn long_outline_label_is_ellipsized_and_shown_in_full_in_the_status_bar() {
+    let label = "A very long heading label that cannot fit";
+    let document = Document::parse(&format!("# {label}\n\n## Child\n"));
+    let mut harness = Harness::new(document, 60, 4);
+    harness.control('w');
+    harness.keys("h");
+
+    let frame = harness.frame();
+    let outline = outline_text(&frame);
+    assert!(outline.contains('…'));
+    assert!(!outline.contains(label));
+    assert_eq!(frame.lines().last(), Some(label));
+}
+
+#[test]
+fn headingless_document_uses_the_full_terminal_width() {
+    let harness = Harness::new(
+        Document::parse("headingless content uses every column\n"),
+        40,
+        2,
+    );
+
+    assert_eq!(
+        harness.frame().lines().next(),
+        Some("headingless content uses every column")
+    );
+    assert!(!harness.frame().contains('│'));
+    assert_eq!(harness.outline_selection(), None);
+}
+
+#[test]
+fn current_section_change_keeps_selection_valid_across_fold_resize_and_toggle() {
+    let document = Document::parse("# Repeated\n\n### Repeated\n\n#### Deep\n\n# Other\n");
+    let mut harness = Harness::new(document, 60, 6);
+    let parent = SemanticPosition {
+        block: 0,
+        grapheme: 0,
+    };
+    let other = SemanticPosition {
+        block: 3,
+        grapheme: 0,
+    };
+    harness.keys("2}");
+    harness.control('w');
+    harness.keys("hh2j");
+    harness.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    harness.keys("}");
+
+    assert_eq!(harness.current_section(), Some(other));
+    assert_eq!(harness.outline_selection(), Some(parent));
+    assert!(!outline_text(&harness.frame()).contains("Deep"));
+
+    harness.resize(24, 6);
+    harness.keys("o");
+    harness.resize(60, 6);
+    harness.keys("o");
+
+    assert_eq!(harness.outline_selection(), Some(parent));
+    assert!(harness.frame().contains('│'));
+}
+
+#[test]
+fn refocusing_outline_keeps_the_selected_heading_above_the_status_bar() {
+    let document = Document::parse(
+        "# One\n\n## Two\n\n## Three\n\n## Four\n\n## Five\n\n## Six\n\n## Seven\n",
+    );
+    let mut harness = Harness::new(document, 60, 4);
+    let seven = SemanticPosition {
+        block: 6,
+        grapheme: 0,
+    };
+    harness.control('w');
+    harness.keys("h6j");
+    harness.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    harness.control('w');
+    harness.keys("h");
+
+    assert!(
+        harness
+            .outline_modifier_at(seven)
+            .is_some_and(|modifier| modifier.contains(Modifier::REVERSED))
+    );
+    assert_eq!(harness.frame().lines().last(), Some("Seven"));
+}
+
+fn outline_text(frame: &str) -> String {
+    frame
+        .lines()
+        .filter_map(|line| line.split_once('│').map(|(outline, _)| outline))
+        .collect::<Vec<_>>()
+        .join("\n")
 }

@@ -3,9 +3,11 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::HeadingLevel;
-use crate::app::{PaneFocus, ReadingSession};
+use crate::app::{OutlineBranchState, PaneFocus, ReadingSession};
 use crate::layout;
 
 pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
@@ -60,12 +62,22 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
         );
         let current_section = session.current_section();
         let outline_selection = session.outline_selection();
-        let outline = session
-            .outline()
-            .iter()
+        let visible_outline = session.visible_outline_indices();
+        let outline = visible_outline
+            .into_iter()
             .skip(session.outline_viewport())
-            .map(|entry| {
-                let indent = "  ".repeat(heading_depth(entry.level).saturating_sub(1));
+            .map(|index| {
+                let entry = &session.outline()[index];
+                let branch_marker = match session.outline_branch_state(index) {
+                    OutlineBranchState::Leaf => "  ",
+                    OutlineBranchState::Collapsed => "▸ ",
+                    OutlineBranchState::Expanded => "▾ ",
+                };
+                let prefix = format!(
+                    "{}{}",
+                    "  ".repeat(entry.level.depth().saturating_sub(1)),
+                    branch_marker
+                );
                 let mut style = Style::new();
                 if Some(entry.position) == current_section {
                     style = style.add_modifier(Modifier::BOLD);
@@ -75,7 +87,10 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
                 {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
-                Line::styled(format!("{indent}{}", entry.label), style)
+                Line::styled(
+                    ellipsize_outline_label(&prefix, &entry.label, panes.outline_width),
+                    style,
+                )
             })
             .collect::<Vec<_>>();
         frame.render_widget(
@@ -83,7 +98,7 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
             outline_area,
         );
     }
-    if let Some(warning) = session.status_warning() {
+    if let Some(status) = session.status_text() {
         let status_area = Rect::new(
             frame.area().x,
             frame.area().bottom().saturating_sub(1),
@@ -91,21 +106,33 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
             1,
         );
         frame.render_widget(
-            Paragraph::new(warning).style(Style::new().add_modifier(Modifier::BOLD)),
+            Paragraph::new(status).style(Style::new().add_modifier(Modifier::BOLD)),
             status_area,
         );
     }
 }
 
-fn heading_depth(level: HeadingLevel) -> usize {
-    match level {
-        HeadingLevel::H1 => 1,
-        HeadingLevel::H2 => 2,
-        HeadingLevel::H3 => 3,
-        HeadingLevel::H4 => 4,
-        HeadingLevel::H5 => 5,
-        HeadingLevel::H6 => 6,
+fn ellipsize_outline_label(prefix: &str, label: &str, width: u16) -> String {
+    let available = usize::from(width).saturating_sub(prefix.width());
+    if label.width() <= available {
+        return format!("{prefix}{label}");
     }
+    if available == 0 {
+        return prefix.to_owned();
+    }
+
+    let label_width = available.saturating_sub(1);
+    let mut visible = String::new();
+    let mut width = 0_usize;
+    for grapheme in label.graphemes(true) {
+        let grapheme_width = grapheme.width();
+        if width.saturating_add(grapheme_width) > label_width {
+            break;
+        }
+        visible.push_str(grapheme);
+        width += grapheme_width;
+    }
+    format!("{prefix}{visible}…")
 }
 
 fn cell_style(semantic: layout::CellStyle, color_enabled: bool) -> Style {
