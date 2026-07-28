@@ -142,7 +142,7 @@ impl ReadingSession {
 
     pub fn resize(&mut self, width: u16, height: u16) {
         if let Some(cursor) = self.cursor {
-            self.ensure_code_cursor_visible(width, cursor);
+            self.ensure_horizontal_cursor_visible(width, cursor);
         }
         let rendered = self.rendered(width);
         self.ensure_cursor_visible(&rendered, height);
@@ -224,15 +224,7 @@ impl ReadingSession {
             }
             Motion::Up | Motion::Down => {
                 let column = *self.preferred_column.get_or_insert(location.column);
-                let row = match motion {
-                    Motion::Up => location.row.saturating_sub(count),
-                    Motion::Down => location
-                        .row
-                        .saturating_add(count)
-                        .min(rendered.rows().len().saturating_sub(1)),
-                    _ => unreachable!(),
-                };
-                rendered.nearest_position(row, column)
+                vertical_target(&rendered, location, column, motion, count)
             }
             Motion::WordForward | Motion::WordBackward => {
                 self.preferred_column = None;
@@ -271,7 +263,7 @@ impl ReadingSession {
 
         if let Some(target) = target {
             self.cursor = Some(target);
-            self.ensure_code_cursor_visible(width, target);
+            self.ensure_horizontal_cursor_visible(width, target);
         }
         let rendered = self.rendered(width);
         self.ensure_cursor_visible(&rendered, height);
@@ -292,7 +284,7 @@ impl ReadingSession {
             _ => rendered.first_position(),
         };
         if let Some(cursor) = self.cursor {
-            self.ensure_code_cursor_visible(width, cursor);
+            self.ensure_horizontal_cursor_visible(width, cursor);
         }
         let rendered = self.rendered(width);
         self.ensure_cursor_visible(&rendered, height);
@@ -323,8 +315,11 @@ impl ReadingSession {
         }
     }
 
-    fn ensure_code_cursor_visible(&mut self, width: u16, cursor: SemanticPosition) {
-        if self.document.blocks()[cursor.block].kind() != crate::BlockKind::Code {
+    fn ensure_horizontal_cursor_visible(&mut self, width: u16, cursor: SemanticPosition) {
+        if !matches!(
+            self.document.blocks()[cursor.block].kind(),
+            crate::BlockKind::Code | crate::BlockKind::Table
+        ) {
             return;
         }
 
@@ -399,6 +394,40 @@ fn horizontal_target(
         _ => unreachable!(),
     };
     cells.get(target).map(|cell| cell.position())
+}
+
+fn vertical_target(
+    rendered: &RenderedDocument,
+    location: CellLocation,
+    column: usize,
+    motion: Motion,
+    count: usize,
+) -> Option<SemanticPosition> {
+    let mut row = location.row;
+    let mut target = location.position;
+
+    for _ in 0..count {
+        let next = match motion {
+            Motion::Up => (0..row).rev().find_map(|candidate| {
+                rendered
+                    .nearest_position(candidate, column)
+                    .map(|position| (candidate, position))
+            }),
+            Motion::Down => (row + 1..rendered.rows().len()).find_map(|candidate| {
+                rendered
+                    .nearest_position(candidate, column)
+                    .map(|position| (candidate, position))
+            }),
+            _ => unreachable!(),
+        };
+        let Some((next_row, next_target)) = next else {
+            break;
+        };
+        row = next_row;
+        target = next_target;
+    }
+
+    Some(target)
 }
 
 fn word_target(
@@ -557,9 +586,10 @@ impl Harness {
         )
     }
 
-    fn with_session(session: ReadingSession, width: u16, height: u16) -> Self {
+    fn with_session(mut session: ReadingSession, width: u16, height: u16) -> Self {
         let backend = TestBackend::new(width, height);
         let terminal = Terminal::new(backend).expect("TestBackend is infallible");
+        session.resize(width, height);
         let mut harness = Self { session, terminal };
         harness.draw();
         harness

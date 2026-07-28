@@ -33,7 +33,7 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
             }
             spans.extend(row.visible_cells().map(|cell| {
                 let mut style = cell_style(cell.style(), color_enabled);
-                if Some(cell.position()) == cursor {
+                if cell.is_navigable() && Some(cell.position()) == cursor {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
                 Span::styled(cell.symbol().to_owned(), style)
@@ -73,6 +73,9 @@ fn cell_style(semantic: layout::CellStyle, color_enabled: bool) -> Style {
     }
     if semantic.is_thematic_break() {
         modifiers |= Modifier::DIM;
+    }
+    if semantic.is_table_header() {
+        modifiers |= Modifier::BOLD;
     }
     let mut style = Style::new().add_modifier(modifiers);
     if let Some(highlight) = semantic.highlight() {

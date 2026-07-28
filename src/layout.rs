@@ -4,9 +4,24 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::highlight::HighlightStyle;
-use crate::{Block, BlockKind, Document, HeadingLevel, InlineStyle, ListMarker};
+use crate::{
+    Block, BlockKind, Document, HeadingLevel, InlineStyle, ListMarker, TableAlignment, TableCell,
+};
 
 const MAX_PROSE_WIDTH: usize = 100;
+
+#[derive(Clone, Copy)]
+struct TableColumnWidth {
+    preferred: usize,
+    minimum: usize,
+}
+
+#[derive(Clone, Copy)]
+struct TableBorder {
+    left: char,
+    junction: char,
+    right: char,
+}
 
 /// Width-independent location in the semantic Document.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -33,6 +48,7 @@ pub struct CellStyle {
     code: bool,
     highlight: Option<HighlightStyle>,
     thematic_break: bool,
+    table_header: bool,
 }
 
 impl CellStyle {
@@ -81,6 +97,11 @@ impl CellStyle {
         self.thematic_break
     }
 
+    #[must_use]
+    pub fn is_table_header(self) -> bool {
+        self.table_header
+    }
+
     fn from_semantics(kind: BlockKind, inline: InlineStyle, link: bool) -> Self {
         Self {
             heading_level: match kind {
@@ -92,11 +113,17 @@ impl CellStyle {
             code: kind == BlockKind::Code,
             highlight: None,
             thematic_break: kind == BlockKind::ThematicBreak,
+            table_header: false,
         }
     }
 
     fn with_highlight(mut self, highlight: Option<HighlightStyle>) -> Self {
         self.highlight = highlight;
+        self
+    }
+
+    fn with_table_header(mut self, table_header: bool) -> Self {
+        self.table_header = table_header;
         self
     }
 }
@@ -109,6 +136,7 @@ pub struct RenderedCell {
     width: usize,
     style: CellStyle,
     link_target: Option<String>,
+    decorative: bool,
 }
 
 impl RenderedCell {
@@ -139,7 +167,7 @@ impl RenderedCell {
 
     #[must_use]
     pub fn is_navigable(&self) -> bool {
-        !self.symbol.chars().all(char::is_whitespace)
+        !self.decorative && !self.symbol.chars().all(char::is_whitespace)
     }
 }
 
@@ -264,7 +292,7 @@ impl RenderedDocument {
     pub fn cell_for_position(&self, position: SemanticPosition) -> Option<CellLocation> {
         self.rows.iter().enumerate().find_map(|(row_index, row)| {
             for projection in row.projected_cells() {
-                if projection.cell.position == position {
+                if projection.cell.is_navigable() && projection.cell.position == position {
                     return Some(CellLocation {
                         row: row_index,
                         column: projection.visible_column?,
@@ -281,6 +309,9 @@ impl RenderedDocument {
     pub fn position_at(&self, row: usize, column: usize) -> Option<SemanticPosition> {
         let row = self.rows.get(row)?;
         for projection in row.projected_cells() {
+            if !projection.cell.is_navigable() {
+                continue;
+            }
             let Some(visible_column) = projection.visible_column else {
                 continue;
             };
@@ -380,6 +411,21 @@ pub(crate) fn layout_with_state(
             );
             continue;
         }
+        if block.kind() == BlockKind::Table {
+            layout_table(
+                block,
+                block_index,
+                pane_width.saturating_sub(leading_width).max(1),
+                leading_width,
+                &leading,
+                horizontal_offsets
+                    .get(block_index)
+                    .copied()
+                    .unwrap_or_default(),
+                &mut rows,
+            );
+            continue;
+        }
         let block_width = content_width.saturating_sub(leading_width).max(1);
         if block.kind() == BlockKind::ThematicBreak {
             layout_thematic_break(
@@ -446,12 +492,8 @@ fn layout_code(
             ended_with_newline = false;
             let display_symbol = if symbol == "\t" {
                 " ".repeat(4 - source_column % 4)
-            } else if UnicodeWidthStr::width(symbol) == 0
-                && !symbol.chars().all(char::is_whitespace)
-            {
-                format!("◌{symbol}")
             } else {
-                symbol.to_owned()
+                display_grapheme(symbol)
             };
             let width = UnicodeWidthStr::width(display_symbol.as_str());
             source_column += width;
@@ -463,6 +505,7 @@ fn layout_code(
                     highlights.and_then(|styles| styles.get(position.grapheme).copied()),
                 ),
                 link_target: None,
+                decorative: false,
             });
         }
     }
@@ -476,6 +519,283 @@ fn layout_code(
             block: block_index,
         });
     }
+}
+
+fn layout_table(
+    block: &Block,
+    block_index: usize,
+    pane_width: usize,
+    column: usize,
+    leading: &str,
+    horizontal_offset: usize,
+    rows: &mut Vec<RenderedRow>,
+) {
+    let table = block.table().expect("table block has table semantics");
+    let column_count = table
+        .rows()
+        .iter()
+        .map(|row| row.cells().len())
+        .chain(std::iter::once(table.alignments().len()))
+        .max()
+        .unwrap_or_default();
+    if column_count == 0 {
+        return;
+    }
+
+    let mut column_widths = vec![
+        TableColumnWidth {
+            preferred: 3,
+            minimum: 3,
+        };
+        column_count
+    ];
+    for row in table.rows() {
+        for (column, cell) in row.cells().iter().enumerate() {
+            let content_width = cell
+                .text()
+                .split('\n')
+                .map(UnicodeWidthStr::width)
+                .max()
+                .unwrap_or_default()
+                .max(1);
+            column_widths[column].preferred = column_widths[column]
+                .preferred
+                .max(content_width.saturating_add(2));
+            let grapheme_width = cell
+                .spans()
+                .iter()
+                .flat_map(|span| span.text().graphemes(true))
+                .filter(|symbol| *symbol != "\n")
+                .map(display_width)
+                .max()
+                .unwrap_or(1);
+            column_widths[column].minimum = column_widths[column]
+                .minimum
+                .max(grapheme_width.saturating_add(2));
+        }
+    }
+    shrink_table_columns(&mut column_widths, pane_width);
+
+    push_table_border(
+        block_index,
+        &column_widths,
+        TableBorder {
+            left: '┌',
+            junction: '┬',
+            right: '┐',
+        },
+        column,
+        leading,
+        horizontal_offset,
+        rows,
+    );
+    for row in table.rows() {
+        let visual_cells = (0..column_count)
+            .map(|column| {
+                row.cells().get(column).map_or_else(
+                    || vec![Vec::new()],
+                    |cell| {
+                        layout_table_cell(
+                            block_index,
+                            cell,
+                            column_widths[column].preferred.saturating_sub(2).max(1),
+                            row.is_header(),
+                        )
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let height = visual_cells.iter().map(Vec::len).max().unwrap_or(1);
+
+        for visual_row in 0..height {
+            let mut cells = Vec::new();
+            push_table_decoration(&mut cells, block_index, "│");
+            for column in 0..column_count {
+                let content = visual_cells[column]
+                    .get(visual_row)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let inner_width = column_widths[column].preferred.saturating_sub(2).max(1);
+                let content_width = cells_width(content);
+                let remaining = inner_width.saturating_sub(content_width);
+                let alignment = table
+                    .alignments()
+                    .get(column)
+                    .copied()
+                    .unwrap_or(TableAlignment::None);
+                let (left, right) = match alignment {
+                    TableAlignment::None | TableAlignment::Left => (1, remaining + 1),
+                    TableAlignment::Center => {
+                        let left = remaining / 2;
+                        (left + 1, remaining - left + 1)
+                    }
+                    TableAlignment::Right => (remaining + 1, 1),
+                };
+                push_table_spaces(&mut cells, block_index, left);
+                cells.extend_from_slice(content);
+                push_table_spaces(&mut cells, block_index, right);
+                push_table_decoration(&mut cells, block_index, "│");
+            }
+            rows.push(RenderedRow {
+                cells,
+                column,
+                leading: leading.to_owned(),
+                horizontal_offset,
+                block: block_index,
+            });
+        }
+
+        if row.is_header() {
+            push_table_border(
+                block_index,
+                &column_widths,
+                TableBorder {
+                    left: '├',
+                    junction: '┼',
+                    right: '┤',
+                },
+                column,
+                leading,
+                horizontal_offset,
+                rows,
+            );
+        }
+    }
+    push_table_border(
+        block_index,
+        &column_widths,
+        TableBorder {
+            left: '└',
+            junction: '┴',
+            right: '┘',
+        },
+        column,
+        leading,
+        horizontal_offset,
+        rows,
+    );
+}
+
+fn shrink_table_columns(column_widths: &mut [TableColumnWidth], pane_width: usize) {
+    let borders = column_widths.len().saturating_add(1);
+    let available = pane_width.saturating_sub(borders);
+    if available < column_widths.iter().map(|width| width.minimum).sum() {
+        for width in column_widths {
+            width.preferred = width.minimum;
+        }
+        return;
+    }
+
+    while column_widths
+        .iter()
+        .map(|width| width.preferred)
+        .sum::<usize>()
+        > available
+    {
+        let Some((column, _)) = column_widths
+            .iter()
+            .enumerate()
+            .filter(|(_, width)| width.preferred > width.minimum)
+            .max_by_key(|(_, width)| width.preferred)
+        else {
+            break;
+        };
+        column_widths[column].preferred -= 1;
+    }
+}
+
+fn layout_table_cell(
+    block_index: usize,
+    cell: &TableCell,
+    width: usize,
+    table_header: bool,
+) -> Vec<Vec<RenderedCell>> {
+    let mut lines = vec![Vec::new()];
+    let mut grapheme = cell.grapheme_offset();
+
+    for span in cell.spans() {
+        let style =
+            CellStyle::from_semantics(BlockKind::Table, span.style(), span.link_target().is_some())
+                .with_table_header(table_header);
+        for symbol in span.text().graphemes(true) {
+            let position = SemanticPosition {
+                block: block_index,
+                grapheme,
+            };
+            grapheme += 1;
+            if symbol == "\n" {
+                lines.push(Vec::new());
+                continue;
+            }
+
+            let display_symbol = display_grapheme(symbol);
+            let symbol_width = UnicodeWidthStr::width(display_symbol.as_str());
+            let line = lines.last_mut().expect("table cell has a visual line");
+            if !line.is_empty() && cells_width(line).saturating_add(symbol_width) > width {
+                lines.push(Vec::new());
+            }
+            lines
+                .last_mut()
+                .expect("table cell has a visual line")
+                .push(RenderedCell {
+                    symbol: display_symbol,
+                    position,
+                    width: symbol_width,
+                    style,
+                    link_target: span.link_target().map(str::to_owned),
+                    decorative: false,
+                });
+        }
+    }
+    lines
+}
+
+fn push_table_border(
+    block: usize,
+    column_widths: &[TableColumnWidth],
+    border: TableBorder,
+    column: usize,
+    leading: &str,
+    horizontal_offset: usize,
+    rows: &mut Vec<RenderedRow>,
+) {
+    let mut cells = Vec::new();
+    push_table_decoration(&mut cells, block, &border.left.to_string());
+    for (column, width) in column_widths.iter().enumerate() {
+        for _ in 0..width.preferred {
+            push_table_decoration(&mut cells, block, "─");
+        }
+        let glyph = if column + 1 == column_widths.len() {
+            border.right
+        } else {
+            border.junction
+        };
+        push_table_decoration(&mut cells, block, &glyph.to_string());
+    }
+    rows.push(RenderedRow {
+        cells,
+        column,
+        leading: leading.to_owned(),
+        horizontal_offset,
+        block,
+    });
+}
+
+fn push_table_spaces(cells: &mut Vec<RenderedCell>, block: usize, count: usize) {
+    for _ in 0..count {
+        push_table_decoration(cells, block, " ");
+    }
+}
+
+fn push_table_decoration(cells: &mut Vec<RenderedCell>, block: usize, symbol: &str) {
+    cells.push(RenderedCell {
+        symbol: symbol.to_owned(),
+        position: SemanticPosition { block, grapheme: 0 },
+        width: UnicodeWidthStr::width(symbol),
+        style: CellStyle::from_semantics(BlockKind::Table, InlineStyle::default(), false),
+        link_target: None,
+        decorative: true,
+    });
 }
 
 fn block_leading(block: &Block) -> String {
@@ -530,6 +850,7 @@ fn layout_thematic_break(
             width: 1,
             style: CellStyle::from_semantics(kind, InlineStyle::default(), false),
             link_target: None,
+            decorative: false,
         }],
         column,
         leading,
@@ -561,6 +882,7 @@ fn layout_empty_list_item(
             },
             style: CellStyle::from_semantics(block.kind(), InlineStyle::default(), false),
             link_target: None,
+            decorative: false,
         }],
         column,
         leading,
@@ -607,19 +929,14 @@ fn wrap_block(
                 continue;
             }
 
-            let display_symbol = if UnicodeWidthStr::width(symbol) == 0
-                && !symbol.chars().all(char::is_whitespace)
-            {
-                format!("◌{symbol}")
-            } else {
-                symbol.to_owned()
-            };
+            let display_symbol = display_grapheme(symbol);
             let cell = RenderedCell {
                 width: UnicodeWidthStr::width(display_symbol.as_str()),
                 symbol: display_symbol,
                 position,
                 style,
                 link_target: span.link_target().map(str::to_owned),
+                decorative: false,
             };
             if symbol.chars().all(char::is_whitespace) {
                 flush_word(
@@ -710,4 +1027,25 @@ fn push_row_if_populated(
 
 fn cells_width(cells: &[RenderedCell]) -> usize {
     cells.iter().map(|cell| cell.width).sum()
+}
+
+fn display_width(grapheme: &str) -> usize {
+    let width = UnicodeWidthStr::width(grapheme);
+    if needs_dotted_circle(grapheme) {
+        1
+    } else {
+        width
+    }
+}
+
+fn display_grapheme(grapheme: &str) -> String {
+    if needs_dotted_circle(grapheme) {
+        format!("◌{grapheme}")
+    } else {
+        grapheme.to_owned()
+    }
+}
+
+fn needs_dotted_circle(grapheme: &str) -> bool {
+    UnicodeWidthStr::width(grapheme) == 0 && !grapheme.chars().all(char::is_whitespace)
 }

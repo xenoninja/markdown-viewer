@@ -1,7 +1,8 @@
 use std::fmt::Write as _;
 
 use pulldown_cmark::{
-    CodeBlockKind, Event, HeadingLevel as ParsedHeadingLevel, Options, Parser, Tag, TagEnd,
+    Alignment as ParsedAlignment, CodeBlockKind, Event, HeadingLevel as ParsedHeadingLevel,
+    Options, Parser, Tag, TagEnd,
 };
 
 /// An owned, width-independent representation of a Markdown Document.
@@ -19,6 +20,7 @@ pub enum BlockKind {
     ThematicBreak,
     RawHtml,
     Empty,
+    Table,
 }
 
 /// List hierarchy attached independently to a block's semantic role.
@@ -57,6 +59,7 @@ pub struct Block {
     quote_depth: usize,
     list_item: Option<ListItem>,
     language: Option<String>,
+    table: Option<Table>,
 }
 
 impl Block {
@@ -89,6 +92,82 @@ impl Block {
     #[must_use]
     pub fn language(&self) -> Option<&str> {
         self.language.as_deref()
+    }
+
+    #[must_use]
+    pub fn table(&self) -> Option<&Table> {
+        self.table.as_ref()
+    }
+}
+
+/// A GFM table's declared column alignment and semantic rows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Table {
+    alignments: Vec<TableAlignment>,
+    rows: Vec<TableRow>,
+}
+
+impl Table {
+    #[must_use]
+    pub fn alignments(&self) -> &[TableAlignment] {
+        &self.alignments
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &[TableRow] {
+        &self.rows
+    }
+}
+
+/// The alignment declared for one GFM table column.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableAlignment {
+    None,
+    Left,
+    Center,
+    Right,
+}
+
+/// One semantic row in a GFM table.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableRow {
+    cells: Vec<TableCell>,
+    header: bool,
+}
+
+impl TableRow {
+    #[must_use]
+    pub fn cells(&self) -> &[TableCell] {
+        &self.cells
+    }
+
+    #[must_use]
+    pub fn is_header(&self) -> bool {
+        self.header
+    }
+}
+
+/// Inline semantic content in one GFM table cell.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableCell {
+    spans: Vec<InlineSpan>,
+    text: String,
+    grapheme_offset: usize,
+}
+
+impl TableCell {
+    #[must_use]
+    pub fn spans(&self) -> &[InlineSpan] {
+        &self.spans
+    }
+
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) fn grapheme_offset(&self) -> usize {
+        self.grapheme_offset
     }
 }
 
@@ -151,9 +230,11 @@ impl InlineSpan {
 impl Document {
     #[must_use]
     pub fn parse(markdown: &str) -> Self {
-        let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+        let options =
+            Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES;
         let mut blocks = Vec::new();
         let mut builder = None;
+        let mut table = None;
         let mut style = InlineStyle::default();
         let mut link_target = None;
         let mut quote_depth = 0;
@@ -162,7 +243,41 @@ impl Document {
 
         for event in Parser::new_ext(markdown, options) {
             match event {
+                Event::Start(Tag::Table(alignments)) => {
+                    finish_builder(&mut builder, &mut blocks);
+                    let list_item = if items.is_empty() {
+                        None
+                    } else {
+                        block_builder_for_item(&mut items, quote_depth, BlockKind::Table).list_item
+                    };
+                    table = Some(TableBuilder::new(
+                        alignments.into_iter().map(table_alignment).collect(),
+                        quote_depth,
+                        list_item,
+                    ));
+                }
+                Event::Start(Tag::TableHead) => {
+                    table
+                        .as_mut()
+                        .expect("table head is inside a table")
+                        .start_row(true);
+                }
+                Event::Start(Tag::TableRow) => {
+                    table
+                        .as_mut()
+                        .expect("table row is inside a table")
+                        .start_row(false);
+                }
+                Event::Start(Tag::TableCell) => {
+                    table
+                        .as_mut()
+                        .expect("table cell is inside a table")
+                        .start_cell();
+                }
                 Event::Start(Tag::Paragraph) => {
+                    if table.is_some() {
+                        continue;
+                    }
                     finish_builder(&mut builder, &mut blocks);
                     if items.is_empty() {
                         builder = Some(BlockBuilder::new(BlockKind::Paragraph, quote_depth));
@@ -235,6 +350,10 @@ impl Document {
                     link_target = Some(make_inert(&dest_url));
                 }
                 Event::Text(text) | Event::InlineHtml(text) | Event::Html(text) => {
+                    if let Some(table) = &mut table {
+                        table.push(&make_inert(&text), style, link_target.as_deref());
+                        continue;
+                    }
                     if builder.is_none() && !items.is_empty() {
                         builder = Some(block_builder_for_leaf(&mut items, quote_depth));
                     }
@@ -248,6 +367,12 @@ impl Document {
                     }
                 }
                 Event::Code(text) => {
+                    if let Some(table) = &mut table {
+                        let mut code_style = style;
+                        code_style.inline_code = true;
+                        table.push(&make_inert(&text), code_style, link_target.as_deref());
+                        continue;
+                    }
                     if builder.is_none() && !items.is_empty() {
                         builder = Some(block_builder_for_leaf(&mut items, quote_depth));
                     }
@@ -258,14 +383,34 @@ impl Document {
                     }
                 }
                 Event::SoftBreak => {
-                    if let Some(builder) = &mut builder {
+                    if let Some(table) = &mut table {
+                        table.push(" ", style, link_target.as_deref());
+                    } else if let Some(builder) = &mut builder {
                         builder.push(" ", style, link_target.as_deref());
                     }
                 }
                 Event::HardBreak => {
-                    if let Some(builder) = &mut builder {
+                    if let Some(table) = &mut table {
+                        table.push("\n", style, link_target.as_deref());
+                    } else if let Some(builder) = &mut builder {
                         builder.push("\n", style, link_target.as_deref());
                     }
+                }
+                Event::End(TagEnd::TableCell) => {
+                    table
+                        .as_mut()
+                        .expect("table cell is inside a table")
+                        .finish_cell();
+                }
+                Event::End(TagEnd::TableHead | TagEnd::TableRow) => {
+                    table
+                        .as_mut()
+                        .expect("table row is inside a table")
+                        .finish_row();
+                }
+                Event::End(TagEnd::Table) => {
+                    let completed = table.take().expect("table end follows table start");
+                    blocks.push(completed.finish());
                 }
                 Event::End(
                     TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::HtmlBlock | TagEnd::CodeBlock,
@@ -368,8 +513,138 @@ impl BlockBuilder {
             quote_depth: self.quote_depth,
             list_item: self.list_item,
             language: self.language,
+            table: None,
         }
     }
+}
+
+#[derive(Debug)]
+struct TableBuilder {
+    alignments: Vec<TableAlignment>,
+    rows: Vec<TableRowBuilder>,
+    row: Option<TableRowBuilder>,
+    cell: Option<BlockBuilder>,
+    quote_depth: usize,
+    list_item: Option<ListItem>,
+}
+
+impl TableBuilder {
+    fn new(
+        alignments: Vec<TableAlignment>,
+        quote_depth: usize,
+        list_item: Option<ListItem>,
+    ) -> Self {
+        Self {
+            alignments,
+            rows: Vec::new(),
+            row: None,
+            cell: None,
+            quote_depth,
+            list_item,
+        }
+    }
+
+    fn start_row(&mut self, header: bool) {
+        self.finish_row();
+        self.row = Some(TableRowBuilder {
+            cells: Vec::new(),
+            header,
+        });
+    }
+
+    fn start_cell(&mut self) {
+        self.finish_cell();
+        if self.row.is_none() {
+            self.start_row(false);
+        }
+        self.cell = Some(BlockBuilder::new(BlockKind::Paragraph, 0));
+    }
+
+    fn push(&mut self, text: &str, style: InlineStyle, link_target: Option<&str>) {
+        if self.cell.is_none() {
+            self.start_cell();
+        }
+        self.cell
+            .as_mut()
+            .expect("table content has a cell")
+            .push(text, style, link_target);
+    }
+
+    fn finish_cell(&mut self) {
+        let Some(cell) = self.cell.take() else {
+            return;
+        };
+        let cell = cell.finish();
+        self.row
+            .as_mut()
+            .expect("table cell belongs to a row")
+            .cells
+            .push(TableCell {
+                spans: cell.spans,
+                text: cell.text,
+                grapheme_offset: 0,
+            });
+    }
+
+    fn finish_row(&mut self) {
+        self.finish_cell();
+        if let Some(row) = self.row.take() {
+            self.rows.push(row);
+        }
+    }
+
+    fn finish(mut self) -> Block {
+        use unicode_segmentation::UnicodeSegmentation;
+
+        self.finish_row();
+        let mut grapheme_offset = 0;
+        let mut text = String::new();
+        let mut first_cell = true;
+        let rows = self
+            .rows
+            .into_iter()
+            .map(|row| {
+                let cells = row
+                    .cells
+                    .into_iter()
+                    .map(|mut cell| {
+                        if !first_cell {
+                            text.push(' ');
+                            grapheme_offset += 1;
+                        }
+                        first_cell = false;
+                        cell.grapheme_offset = grapheme_offset;
+                        grapheme_offset += cell.text.graphemes(true).count();
+                        text.push_str(&cell.text);
+                        cell
+                    })
+                    .collect();
+                TableRow {
+                    cells,
+                    header: row.header,
+                }
+            })
+            .collect();
+
+        Block {
+            kind: BlockKind::Table,
+            spans: Vec::new(),
+            text,
+            quote_depth: self.quote_depth,
+            list_item: self.list_item,
+            language: None,
+            table: Some(Table {
+                alignments: self.alignments,
+                rows,
+            }),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TableRowBuilder {
+    cells: Vec<TableCell>,
+    header: bool,
 }
 
 #[derive(Debug)]
@@ -434,6 +709,15 @@ fn heading_level(level: ParsedHeadingLevel) -> HeadingLevel {
         ParsedHeadingLevel::H4 => HeadingLevel::H4,
         ParsedHeadingLevel::H5 => HeadingLevel::H5,
         ParsedHeadingLevel::H6 => HeadingLevel::H6,
+    }
+}
+
+fn table_alignment(alignment: ParsedAlignment) -> TableAlignment {
+    match alignment {
+        ParsedAlignment::None => TableAlignment::None,
+        ParsedAlignment::Left => TableAlignment::Left,
+        ParsedAlignment::Center => TableAlignment::Center,
+        ParsedAlignment::Right => TableAlignment::Right,
     }
 }
 

@@ -31,6 +31,8 @@ pub fn run_reading_session(document: Document) -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut session = ReadingSession::new(document);
+    let initial_area = terminal.size()?;
+    session.resize(initial_area.width, initial_area.height);
 
     while !session.has_quit() {
         let area = terminal.size()?;
