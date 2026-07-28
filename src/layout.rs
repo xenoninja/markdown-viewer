@@ -856,28 +856,11 @@ fn quote_leading(block: &Block) -> String {
 }
 
 fn alert_label(kind: AlertKind) -> &'static str {
-    match kind {
-        AlertKind::Note => "NOTE",
-        AlertKind::Tip => "TIP",
-        AlertKind::Important => "IMPORTANT",
-        AlertKind::Warning => "WARNING",
-        AlertKind::Caution => "CAUTION",
-    }
+    kind.rendered_label()
 }
 
 fn list_marker(marker: ListMarker) -> String {
-    match marker {
-        ListMarker::Unordered => "• ".to_owned(),
-        ListMarker::Ordered(number) => format!("{number}. "),
-        ListMarker::Task {
-            checked,
-            number: None,
-        } => format!("{} ", if checked { '☑' } else { '☐' }),
-        ListMarker::Task {
-            checked,
-            number: Some(number),
-        } => format!("{number}. {} ", if checked { '☑' } else { '☐' }),
-    }
+    marker.rendered_text()
 }
 
 fn layout_thematic_break(
@@ -1022,16 +1005,7 @@ fn wrap_block(
 
 fn inline_display_text(span: &crate::InlineSpan) -> String {
     span.image()
-        .map_or_else(|| span.text().to_owned(), image_placeholder)
-}
-
-fn image_placeholder(image: &Image) -> String {
-    let alt = if image.alt_text().is_empty() {
-        "(no alt text)"
-    } else {
-        image.alt_text()
-    };
-    format!("[image: {alt} → {}]", image.target())
+        .map_or_else(|| span.text().to_owned(), Image::rendered_text)
 }
 
 fn rendered_image_cell(
@@ -1040,7 +1014,7 @@ fn rendered_image_cell(
     style: CellStyle,
     image: &Image,
 ) -> RenderedCell {
-    let symbol = image_placeholder(image);
+    let symbol = image.rendered_text();
     RenderedCell {
         width: UnicodeWidthStr::width(symbol.as_str()),
         symbol,

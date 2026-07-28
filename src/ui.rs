@@ -33,16 +33,23 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
                 spans.push(Span::raw(" ".repeat(blank_width)));
             }
             if !row.leading().is_empty() {
-                spans.push(Span::styled(
-                    row.leading().to_owned(),
-                    Style::new().add_modifier(Modifier::DIM),
-                ));
+                if let Some(query) = session.search_leading_query(row.block()) {
+                    spans.extend(highlighted_leading(row.leading(), query));
+                } else {
+                    spans.push(Span::styled(
+                        row.leading().to_owned(),
+                        Style::new().add_modifier(Modifier::DIM),
+                    ));
+                }
             }
             if row.clipped_prefix_width() > 0 {
                 spans.push(Span::raw(" ".repeat(row.clipped_prefix_width())));
             }
             spans.extend(row.visible_cells().map(|cell| {
                 let mut style = cell_style(cell.style(), color_enabled);
+                if session.is_search_match(cell.position()) {
+                    style = style.add_modifier(Modifier::UNDERLINED);
+                }
                 if cell.is_navigable() && Some(cell.position()) == cursor {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
@@ -110,6 +117,24 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
             status_area,
         );
     }
+}
+
+fn highlighted_leading(leading: &str, query: &str) -> Vec<Span<'static>> {
+    let plain = Style::new().add_modifier(Modifier::DIM);
+    let matched = plain.add_modifier(Modifier::UNDERLINED);
+    let mut spans = Vec::new();
+    let mut offset = 0;
+    for range in crate::search::literal_match_ranges(leading, query) {
+        if offset < range.start {
+            spans.push(Span::styled(leading[offset..range.start].to_owned(), plain));
+        }
+        spans.push(Span::styled(leading[range.clone()].to_owned(), matched));
+        offset = range.end;
+    }
+    if offset < leading.len() {
+        spans.push(Span::styled(leading[offset..].to_owned(), plain));
+    }
+    spans
 }
 
 fn ellipsize_outline_label(prefix: &str, label: &str, width: u16) -> String {

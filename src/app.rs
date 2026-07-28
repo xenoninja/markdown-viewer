@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -9,6 +10,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::highlight::{CodeHighlighter, HighlightCache};
 use crate::layout::{CellLocation, RenderedDocument, SemanticPosition, layout, layout_with_state};
+use crate::search::{SearchMatch, find_matches};
 use crate::source::{SourceError, load_document};
 use crate::ui;
 use crate::{BlockKind, Document, HeadingLevel};
@@ -85,6 +87,15 @@ enum JumpDirection {
 }
 
 #[derive(Debug)]
+struct SearchPrompt {
+    query: String,
+    prior_focus: PaneFocus,
+    prior_viewport: usize,
+    prior_outline_viewport: usize,
+    prior_message: Option<String>,
+}
+
+#[derive(Debug)]
 pub struct ReadingSession {
     document: Document,
     cursor: Option<SemanticPosition>,
@@ -100,6 +111,12 @@ pub struct ReadingSession {
     pending_count: Option<usize>,
     pending_g: bool,
     pending_control_w: bool,
+    search_prompt: Option<SearchPrompt>,
+    search_matches: Vec<SearchMatch>,
+    search_highlights: BTreeSet<SemanticPosition>,
+    search_leading_highlights: BTreeSet<usize>,
+    search_query: Option<String>,
+    search_message: Option<String>,
     quit: bool,
     highlighting: HighlightCache,
 }
@@ -145,6 +162,12 @@ impl ReadingSession {
             pending_count: None,
             pending_g: false,
             pending_control_w: false,
+            search_prompt: None,
+            search_matches: Vec::new(),
+            search_highlights: BTreeSet::new(),
+            search_leading_highlights: BTreeSet::new(),
+            search_query: None,
+            search_message: None,
             quit: false,
             highlighting,
         }
@@ -157,6 +180,11 @@ impl ReadingSession {
     }
 
     pub fn key(&mut self, key: KeyEvent, width: u16, screen_height: u16) {
+        if self.search_prompt.is_some() {
+            self.search_prompt_key(key, width, screen_height);
+            return;
+        }
+
         let height = self.content_height(screen_height);
         if key.code == KeyCode::Esc {
             self.focus = PaneFocus::Document;
@@ -212,6 +240,20 @@ impl ReadingSession {
             self.clear_pending();
             return;
         };
+
+        if character == '/' {
+            self.search_prompt = Some(SearchPrompt {
+                query: String::new(),
+                prior_focus: self.focus,
+                prior_viewport: self.viewport,
+                prior_outline_viewport: self.outline_viewport,
+                prior_message: self.search_message.take(),
+            });
+            self.clear_pending();
+            let rendered = self.rendered(width);
+            self.ensure_cursor_visible(&rendered, self.content_height(screen_height));
+            return;
+        }
 
         if character.is_ascii_digit() {
             if self.focus == PaneFocus::Document && character == '0' && self.pending_count.is_none()
@@ -274,6 +316,8 @@ impl ReadingSession {
             'G' => self.document_row(width, height, supplied_count, true),
             '{' => self.motion(width, height, Motion::ParagraphBackward, count),
             '}' => self.motion(width, height, Motion::ParagraphForward, count),
+            'n' => self.navigate_search(true, width, height),
+            'N' => self.navigate_search(false, width, height),
             _ => self.clear_pending(),
         }
     }
@@ -382,13 +426,17 @@ impl ReadingSession {
             .map(|warning| warning.message())
     }
 
-    pub(crate) fn status_text(&self) -> Option<&str> {
-        if self.focus == PaneFocus::Outline {
+    pub(crate) fn status_text(&self) -> Option<String> {
+        if let Some(prompt) = &self.search_prompt {
+            Some(format!("/{}", prompt.query))
+        } else if let Some(message) = &self.search_message {
+            Some(message.clone())
+        } else if self.focus == PaneFocus::Outline {
             self.outline_selection
                 .and_then(|selection| self.outline.get(selection))
-                .map(|entry| entry.label.as_str())
+                .map(|entry| entry.label.clone())
         } else {
-            self.status_warning()
+            self.status_warning().map(str::to_owned)
         }
     }
 
@@ -426,6 +474,17 @@ impl ReadingSession {
 
     pub(crate) fn outline_viewport(&self) -> usize {
         self.outline_viewport
+    }
+
+    pub(crate) fn is_search_match(&self, position: SemanticPosition) -> bool {
+        self.search_highlights.contains(&position)
+    }
+
+    pub(crate) fn search_leading_query(&self, block: usize) -> Option<&str> {
+        self.search_leading_highlights
+            .contains(&block)
+            .then_some(self.search_query.as_deref())
+            .flatten()
     }
 
     pub(crate) fn pane_layout(&self, screen_width: u16) -> PaneLayout {
@@ -678,6 +737,102 @@ impl ReadingSession {
         self.pending_count = None;
         self.pending_g = false;
         self.pending_control_w = false;
+    }
+
+    fn search_prompt_key(&mut self, key: KeyEvent, width: u16, screen_height: u16) {
+        match key.code {
+            KeyCode::Esc => {
+                let prompt = self.search_prompt.take().expect("Search Prompt is active");
+                self.focus = if prompt.prior_focus == PaneFocus::Outline
+                    && !self.outline_is_visible(width)
+                {
+                    PaneFocus::Document
+                } else {
+                    prompt.prior_focus
+                };
+                self.viewport = prompt.prior_viewport;
+                self.outline_viewport = prompt.prior_outline_viewport;
+                self.search_message = prompt.prior_message;
+            }
+            KeyCode::Backspace => {
+                if let Some(prompt) = &mut self.search_prompt {
+                    prompt.query.pop();
+                }
+            }
+            KeyCode::Enter => {
+                self.confirm_search(width, screen_height);
+                return;
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if let Some(prompt) = &mut self.search_prompt {
+                    prompt.query.push(character);
+                }
+            }
+            _ => {}
+        }
+        let rendered = self.rendered(width);
+        self.ensure_cursor_visible(&rendered, self.content_height(screen_height));
+        self.ensure_outline_context_visible(self.content_height(screen_height));
+    }
+
+    fn confirm_search(&mut self, width: u16, screen_height: u16) {
+        let prompt = self.search_prompt.take().expect("Search Prompt is active");
+        if prompt.query.is_empty() {
+            self.focus = prompt.prior_focus;
+            self.viewport = prompt.prior_viewport;
+            self.outline_viewport = prompt.prior_outline_viewport;
+            self.search_message = prompt.prior_message;
+            return;
+        }
+
+        self.focus = PaneFocus::Document;
+        self.search_matches = find_matches(&self.document, &prompt.query);
+        self.search_query = Some(prompt.query.clone());
+        self.search_highlights = self
+            .search_matches
+            .iter()
+            .flat_map(|search_match| search_match.positions.iter().copied())
+            .collect();
+        self.search_leading_highlights = self
+            .search_matches
+            .iter()
+            .flat_map(|search_match| search_match.leading_blocks.iter().copied())
+            .collect();
+        if self.search_matches.is_empty() {
+            self.search_message = Some(format!("Pattern not found: {}", prompt.query));
+            let rendered = self.rendered(width);
+            self.ensure_cursor_visible(&rendered, self.content_height(screen_height));
+            return;
+        }
+
+        self.search_message = None;
+        self.navigate_search(true, width, self.content_height(screen_height));
+    }
+
+    fn navigate_search(&mut self, forward: bool, width: u16, height: u16) {
+        let Some(cursor) = self.cursor else {
+            return;
+        };
+        let target = if forward {
+            self.search_matches
+                .iter()
+                .find(|search_match| search_match.start > cursor)
+                .or_else(|| self.search_matches.first())
+        } else {
+            self.search_matches
+                .iter()
+                .rev()
+                .find(|search_match| search_match.start < cursor)
+                .or_else(|| self.search_matches.last())
+        }
+        .map(|search_match| search_match.start);
+        if let Some(target) = target {
+            self.move_cursor_to(target, width, height);
+        }
     }
 
     fn move_outline_selection(&mut self, count: usize, forward: bool, height: u16) {
@@ -1130,6 +1285,13 @@ impl Harness {
         let column = u16::try_from(location.column).ok()?;
         let row = u16::try_from(location.row).ok()?;
         Some(self.terminal.backend().buffer()[(column, row)].modifier)
+    }
+
+    #[must_use]
+    pub fn screen_modifier(&self, column: u16, row: u16) -> Option<Modifier> {
+        let buffer = self.terminal.backend().buffer();
+        (column < buffer.area.width && row < buffer.area.height)
+            .then(|| buffer[(column, row)].modifier)
     }
 
     #[must_use]

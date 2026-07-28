@@ -52,6 +52,18 @@ pub enum AlertKind {
     Caution,
 }
 
+impl AlertKind {
+    pub(crate) const fn rendered_label(self) -> &'static str {
+        match self {
+            Self::Note => "NOTE",
+            Self::Tip => "TIP",
+            Self::Important => "IMPORTANT",
+            Self::Warning => "WARNING",
+            Self::Caution => "CAUTION",
+        }
+    }
+}
+
 /// List hierarchy attached independently to a block's semantic role.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ListItem {
@@ -266,6 +278,15 @@ impl Image {
     #[must_use]
     pub fn target(&self) -> &str {
         &self.target
+    }
+
+    pub(crate) fn rendered_text(&self) -> String {
+        let alt = if self.alt_text.is_empty() {
+            "(no alt text)"
+        } else {
+            &self.alt_text
+        };
+        format!("[image: {alt} → {}]", self.target)
     }
 }
 
@@ -840,6 +861,21 @@ struct ItemContext {
 }
 
 impl ListMarker {
+    pub(crate) fn rendered_text(self) -> String {
+        match self {
+            Self::Unordered => "• ".to_owned(),
+            Self::Ordered(number) => format!("{number}. "),
+            Self::Task {
+                checked,
+                number: None,
+            } => format!("{} ", if checked { '☑' } else { '☐' }),
+            Self::Task {
+                checked,
+                number: Some(number),
+            } => format!("{number}. {} ", if checked { '☑' } else { '☐' }),
+        }
+    }
+
     fn with_task_state(self, checked: bool) -> Self {
         let number = match self {
             Self::Ordered(number) => Some(number),

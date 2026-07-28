@@ -2,6 +2,7 @@ mod app;
 mod document;
 mod highlight;
 mod layout;
+mod search;
 mod source;
 mod terminal;
 mod ui;
