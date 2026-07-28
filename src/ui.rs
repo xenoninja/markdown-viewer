@@ -3,6 +3,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
+use crate::HeadingLevel;
 use crate::app::ReadingSession;
 use crate::layout;
 
@@ -43,12 +44,12 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
 fn cell_style(semantic: layout::CellStyle) -> Style {
     let mut modifiers = Modifier::empty();
     modifiers |= match semantic.heading_level() {
-        Some(1) => Modifier::BOLD | Modifier::UNDERLINED,
-        Some(2) => Modifier::BOLD,
-        Some(3) => Modifier::UNDERLINED,
-        Some(4) => Modifier::ITALIC,
-        Some(5) => Modifier::DIM,
-        Some(6) => Modifier::DIM | Modifier::ITALIC,
+        Some(HeadingLevel::H1) => Modifier::BOLD | Modifier::UNDERLINED,
+        Some(HeadingLevel::H2) => Modifier::BOLD,
+        Some(HeadingLevel::H3) => Modifier::UNDERLINED,
+        Some(HeadingLevel::H4) => Modifier::ITALIC,
+        Some(HeadingLevel::H5) => Modifier::DIM,
+        Some(HeadingLevel::H6) => Modifier::DIM | Modifier::ITALIC,
         _ => Modifier::empty(),
     };
     if semantic.is_emphasis() {
@@ -61,7 +62,7 @@ fn cell_style(semantic: layout::CellStyle) -> Style {
         modifiers |= Modifier::CROSSED_OUT;
     }
     if semantic.is_inline_code() {
-        modifiers |= Modifier::REVERSED;
+        modifiers |= Modifier::DIM | Modifier::UNDERLINED;
     }
     if semantic.is_link() {
         modifiers |= Modifier::UNDERLINED;

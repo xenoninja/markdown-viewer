@@ -537,6 +537,19 @@ impl Harness {
     }
 
     #[must_use]
+    pub fn modifier_at(&self, position: SemanticPosition) -> Option<Modifier> {
+        let area = self.terminal.backend().buffer().area;
+        let location = layout(self.session.document(), area.width).cell_for_position(position)?;
+        let row = location.row.checked_sub(self.session.viewport())?;
+        if row >= usize::from(area.height) {
+            return None;
+        }
+        let column = u16::try_from(location.column).ok()?;
+        let row = u16::try_from(row).ok()?;
+        Some(self.terminal.backend().buffer()[(column, row)].modifier)
+    }
+
+    #[must_use]
     pub fn frame(&self) -> String {
         let buffer = self.terminal.backend().buffer();
         (0..buffer.area.height)

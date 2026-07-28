@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel as ParsedHeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// An owned, width-independent representation of a Markdown Document.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -12,10 +12,25 @@ pub struct Document {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockKind {
     Paragraph,
-    Heading(u8),
-    ListItem { depth: usize, marker: ListMarker },
+    Heading(HeadingLevel),
+    ListItem {
+        depth: usize,
+        marker: ListMarker,
+        continuation: bool,
+    },
     ThematicBreak,
     RawHtml,
+}
+
+/// A Markdown heading's declared level.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HeadingLevel {
+    H1,
+    H2,
+    H3,
+    H4,
+    H5,
+    H6,
 }
 
 /// The meaningful marker attached to a list item.
@@ -178,6 +193,9 @@ impl Document {
                     }
                 }
                 Event::Code(text) => {
+                    if builder.is_none() && !items.is_empty() {
+                        builder = Some(block_builder_for_leaf(&mut items, quote_depth));
+                    }
                     if let Some(builder) = &mut builder {
                         let mut code_style = style;
                         code_style.inline_code = true;
@@ -212,18 +230,12 @@ impl Document {
                 Event::End(TagEnd::Link) => link_target = None,
                 Event::TaskListMarker(checked) => {
                     if let Some(item) = items.last_mut() {
-                        let number = match item.marker {
-                            ListMarker::Ordered(number) => Some(number),
-                            ListMarker::Unordered | ListMarker::Task { .. } => None,
-                        };
-                        item.marker = ListMarker::Task { checked, number };
+                        item.marker = item.marker.with_task_state(checked);
                     }
                 }
                 Event::Rule => {
                     finish_builder(&mut builder, &mut blocks);
-                    let mut rule = BlockBuilder::new(BlockKind::ThematicBreak, quote_depth);
-                    rule.push("────────", InlineStyle::default(), None);
-                    blocks.push(rule.finish());
+                    blocks.push(BlockBuilder::new(BlockKind::ThematicBreak, quote_depth).finish());
                 }
                 _ => {}
             }
@@ -299,50 +311,28 @@ struct ItemContext {
 }
 
 impl ListMarker {
-    fn text(self) -> &'static str {
-        match self {
-            Self::Unordered => "• ",
-            Self::Ordered(_) => "",
-            Self::Task {
-                checked: true,
-                number: None,
-            } => "☑ ",
-            Self::Task {
-                checked: false,
-                number: None,
-            } => "☐ ",
-            Self::Task {
-                number: Some(_), ..
-            } => "",
-        }
-    }
-
-    fn rendered_text(self) -> String {
-        match self {
-            Self::Ordered(number) => format!("{number}. "),
-            Self::Task {
-                checked,
-                number: Some(number),
-            } => format!("{number}. {} ", if checked { '☑' } else { '☐' }),
-            _ => self.text().to_owned(),
-        }
+    fn with_task_state(self, checked: bool) -> Self {
+        let number = match self {
+            Self::Ordered(number) => Some(number),
+            Self::Task { number, .. } => number,
+            Self::Unordered => None,
+        };
+        Self::Task { checked, number }
     }
 }
 
 fn block_builder_for_leaf(items: &mut [ItemContext], quote_depth: usize) -> BlockBuilder {
-    if let Some(item) = items.last_mut()
-        && !item.started
-    {
+    if let Some(item) = items.last_mut() {
+        let continuation = item.started;
         item.started = true;
-        let mut builder = BlockBuilder::new(
+        return BlockBuilder::new(
             BlockKind::ListItem {
                 depth: item.depth,
                 marker: item.marker,
+                continuation,
             },
             quote_depth,
         );
-        builder.push(&item.marker.rendered_text(), InlineStyle::default(), None);
-        return builder;
     }
 
     BlockBuilder::new(BlockKind::Paragraph, quote_depth)
@@ -354,14 +344,14 @@ fn finish_builder(builder: &mut Option<BlockBuilder>, blocks: &mut Vec<Block>) {
     }
 }
 
-fn heading_level(level: HeadingLevel) -> u8 {
+fn heading_level(level: ParsedHeadingLevel) -> HeadingLevel {
     match level {
-        HeadingLevel::H1 => 1,
-        HeadingLevel::H2 => 2,
-        HeadingLevel::H3 => 3,
-        HeadingLevel::H4 => 4,
-        HeadingLevel::H5 => 5,
-        HeadingLevel::H6 => 6,
+        ParsedHeadingLevel::H1 => HeadingLevel::H1,
+        ParsedHeadingLevel::H2 => HeadingLevel::H2,
+        ParsedHeadingLevel::H3 => HeadingLevel::H3,
+        ParsedHeadingLevel::H4 => HeadingLevel::H4,
+        ParsedHeadingLevel::H5 => HeadingLevel::H5,
+        ParsedHeadingLevel::H6 => HeadingLevel::H6,
     }
 }
 

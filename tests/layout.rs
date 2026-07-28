@@ -1,4 +1,4 @@
-use mdview::{Document, SemanticPosition, layout};
+use mdview::{Document, HeadingLevel, SemanticPosition, layout};
 use std::collections::BTreeSet;
 
 #[test]
@@ -101,9 +101,9 @@ fn common_github_markdown_has_semantic_terminal_layout() {
     let one = rendered.rows()[0].cells()[0].style();
     let three = rendered.rows()[1].cells()[0].style();
     let six = rendered.rows()[2].cells()[0].style();
-    assert_eq!(one.heading_level(), Some(1));
-    assert_eq!(three.heading_level(), Some(3));
-    assert_eq!(six.heading_level(), Some(6));
+    assert_eq!(one.heading_level(), Some(HeadingLevel::H1));
+    assert_eq!(three.heading_level(), Some(HeadingLevel::H3));
+    assert_eq!(six.heading_level(), Some(HeadingLevel::H6));
     assert_ne!(one, three);
     assert_ne!(three, six);
 
@@ -151,6 +151,33 @@ fn common_markdown_meaning_and_cursor_mappings_survive_reflow() {
                 .iter()
                 .flat_map(|row| row.cells())
                 .any(|cell| cell.style().is_inline_code())
+        );
+    }
+}
+
+#[test]
+fn list_continuation_and_thematic_decorations_are_not_cursor_cells() {
+    let document = Document::parse("- first paragraph\n\n  continuation paragraph\n\n---\n");
+    let rendered = layout(&document, 40);
+    let rows = rendered
+        .rows()
+        .iter()
+        .map(mdview::RenderedRow::text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        ["• first paragraph", "  continuation paragraph", "────────",]
+    );
+
+    let rule = &rendered.rows()[2];
+    assert_eq!(rule.cells().len(), 1, "one semantic thematic-break anchor");
+    assert!(rule.cells()[0].is_navigable());
+    for column in 0..rule.column() {
+        assert_eq!(
+            rendered.position_at(2, column),
+            None,
+            "thematic decoration cannot receive the Reading Cursor"
         );
     }
 }

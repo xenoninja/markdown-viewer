@@ -281,3 +281,21 @@ fn reading_cursor_visits_all_semantic_constructs_and_skips_decoration() {
         harness.keys("l");
     }
 }
+
+#[test]
+fn reading_cursor_remains_visible_on_inline_code() {
+    let document = Document::parse("`ab`");
+    let harness = Harness::new(document, 20, 2);
+    let cursor = harness.cursor().expect("cursor starts on inline code");
+    let neighbor = SemanticPosition {
+        block: cursor.block,
+        grapheme: cursor.grapheme + 1,
+    };
+
+    assert_ne!(
+        harness.modifier_at(cursor),
+        harness.modifier_at(neighbor),
+        "cursor styling must differ from ordinary inline-code styling"
+    );
+    assert!(harness.cursor_is_highlighted());
+}

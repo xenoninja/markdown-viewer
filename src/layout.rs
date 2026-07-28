@@ -1,7 +1,7 @@
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::{Block, BlockKind, Document, InlineStyle};
+use crate::{Block, BlockKind, Document, HeadingLevel, InlineStyle, ListMarker};
 
 const MAX_PROSE_WIDTH: usize = 100;
 
@@ -24,39 +24,36 @@ pub struct CellLocation {
 /// Semantic presentation carried by a rendered cell.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CellStyle {
-    heading_level: Option<u8>,
-    emphasis: bool,
-    strong: bool,
-    strikethrough: bool,
-    inline_code: bool,
+    heading_level: Option<HeadingLevel>,
+    inline: InlineStyle,
     link: bool,
     thematic_break: bool,
 }
 
 impl CellStyle {
     #[must_use]
-    pub fn heading_level(self) -> Option<u8> {
+    pub fn heading_level(self) -> Option<HeadingLevel> {
         self.heading_level
     }
 
     #[must_use]
     pub fn is_emphasis(self) -> bool {
-        self.emphasis
+        self.inline.is_emphasis()
     }
 
     #[must_use]
     pub fn is_strong(self) -> bool {
-        self.strong
+        self.inline.is_strong()
     }
 
     #[must_use]
     pub fn is_strikethrough(self) -> bool {
-        self.strikethrough
+        self.inline.is_strikethrough()
     }
 
     #[must_use]
     pub fn is_inline_code(self) -> bool {
-        self.inline_code
+        self.inline.is_inline_code()
     }
 
     #[must_use]
@@ -75,10 +72,7 @@ impl CellStyle {
                 BlockKind::Heading(level) => Some(level),
                 _ => None,
             },
-            emphasis: inline.is_emphasis(),
-            strong: inline.is_strong(),
-            strikethrough: inline.is_strikethrough(),
-            inline_code: inline.is_inline_code(),
+            inline,
             link,
             thematic_break: kind == BlockKind::ThematicBreak,
         }
@@ -273,6 +267,10 @@ pub fn layout(document: &Document, width: u16) -> RenderedDocument {
         let leading = block_leading(block);
         let leading_width = UnicodeWidthStr::width(leading.as_str());
         let block_width = content_width.saturating_sub(leading_width).max(1);
+        if block.kind() == BlockKind::ThematicBreak {
+            layout_thematic_break(block_index, block_width, base_column, leading, &mut rows);
+            continue;
+        }
         let column = base_column + leading_width;
         wrap_block(block, block_index, block_width, column, &leading, &mut rows);
     }
@@ -285,10 +283,63 @@ pub fn layout(document: &Document, width: u16) -> RenderedDocument {
 
 fn block_leading(block: &Block) -> String {
     let mut leading = "│ ".repeat(block.quote_depth());
-    if let BlockKind::ListItem { depth, .. } = block.kind() {
+    if let BlockKind::ListItem {
+        depth,
+        marker,
+        continuation,
+    } = block.kind()
+    {
         leading.push_str(&"  ".repeat(depth.saturating_sub(1)));
+        let marker = list_marker(marker);
+        if continuation {
+            leading.push_str(&" ".repeat(UnicodeWidthStr::width(marker.as_str())));
+        } else {
+            leading.push_str(&marker);
+        }
     }
     leading
+}
+
+fn list_marker(marker: ListMarker) -> String {
+    match marker {
+        ListMarker::Unordered => "• ".to_owned(),
+        ListMarker::Ordered(number) => format!("{number}. "),
+        ListMarker::Task {
+            checked,
+            number: None,
+        } => format!("{} ", if checked { '☑' } else { '☐' }),
+        ListMarker::Task {
+            checked,
+            number: Some(number),
+        } => format!("{number}. {} ", if checked { '☑' } else { '☐' }),
+    }
+}
+
+fn layout_thematic_break(
+    block: usize,
+    width: usize,
+    base_column: usize,
+    mut leading: String,
+    rows: &mut Vec<RenderedRow>,
+) {
+    let rule_width = width.clamp(1, 8);
+    leading.push_str(&"─".repeat(rule_width.saturating_sub(1)));
+    let column = base_column + UnicodeWidthStr::width(leading.as_str());
+    rows.push(RenderedRow {
+        cells: vec![RenderedCell {
+            symbol: "─".to_owned(),
+            position: SemanticPosition { block, grapheme: 0 },
+            width: 1,
+            style: CellStyle::from_semantics(
+                BlockKind::ThematicBreak,
+                InlineStyle::default(),
+                false,
+            ),
+            link_target: None,
+        }],
+        column,
+        leading,
+    });
 }
 
 fn wrap_block(

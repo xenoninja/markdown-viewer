@@ -1,4 +1,4 @@
-use mdview::{BlockKind, Document, ListMarker};
+use mdview::{BlockKind, Document, HeadingLevel, ListMarker};
 
 #[test]
 fn headings_and_inline_formatting_keep_meaning_without_authoring_markers() {
@@ -7,7 +7,7 @@ fn headings_and_inline_formatting_keep_meaning_without_authoring_markers() {
     );
 
     let heading = &document.blocks()[0];
-    assert_eq!(heading.kind(), BlockKind::Heading(1));
+    assert_eq!(heading.kind(), BlockKind::Heading(HeadingLevel::H1));
     assert_eq!(heading.text(), "Read carefully, please, later and follow.");
 
     let carefully = heading
@@ -51,22 +51,25 @@ fn ordered_unordered_nested_and_task_lists_keep_hierarchy_and_markers() {
             BlockKind::ListItem {
                 depth: 1,
                 marker: ListMarker::Ordered(3),
+                continuation: false,
             },
-            "3. first",
+            "first",
         ),
         (
             BlockKind::ListItem {
                 depth: 1,
                 marker: ListMarker::Ordered(4),
+                continuation: false,
             },
-            "4. second",
+            "second",
         ),
         (
             BlockKind::ListItem {
                 depth: 2,
                 marker: ListMarker::Unordered,
+                continuation: false,
             },
-            "• nested",
+            "nested",
         ),
         (
             BlockKind::ListItem {
@@ -75,8 +78,9 @@ fn ordered_unordered_nested_and_task_lists_keep_hierarchy_and_markers() {
                     checked: true,
                     number: None,
                 },
+                continuation: false,
             },
-            "☑ complete",
+            "complete",
         ),
         (
             BlockKind::ListItem {
@@ -85,8 +89,9 @@ fn ordered_unordered_nested_and_task_lists_keep_hierarchy_and_markers() {
                     checked: false,
                     number: None,
                 },
+                continuation: false,
             },
-            "☐ pending",
+            "pending",
         ),
     ];
 
@@ -119,7 +124,7 @@ fn breaks_quotes_inline_code_and_thematic_breaks_are_semantic() {
     );
 
     assert_eq!(document.blocks()[2].kind(), BlockKind::ThematicBreak);
-    assert_eq!(document.blocks()[2].text(), "────────");
+    assert_eq!(document.blocks()[2].text(), "");
 }
 
 #[test]
@@ -127,8 +132,14 @@ fn skipped_heading_levels_remain_declared_without_synthetic_blocks() {
     let document = Document::parse("# Parent\n\n#### Declared child\n");
 
     assert_eq!(document.blocks().len(), 2);
-    assert_eq!(document.blocks()[0].kind(), BlockKind::Heading(1));
-    assert_eq!(document.blocks()[1].kind(), BlockKind::Heading(4));
+    assert_eq!(
+        document.blocks()[0].kind(),
+        BlockKind::Heading(HeadingLevel::H1)
+    );
+    assert_eq!(
+        document.blocks()[1].kind(),
+        BlockKind::Heading(HeadingLevel::H4)
+    );
 }
 
 #[test]
@@ -164,4 +175,42 @@ fn controls_are_inert_inside_every_supported_textual_construct() {
             );
         }
     }
+}
+
+#[test]
+fn an_inline_code_only_list_item_is_not_dropped() {
+    let document = Document::parse("- `cargo test`\n");
+
+    assert_eq!(document.blocks().len(), 1);
+    assert!(
+        document.blocks()[0]
+            .spans()
+            .iter()
+            .any(|span| span.text() == "cargo test" && span.style().is_inline_code())
+    );
+}
+
+#[test]
+fn list_item_continuations_keep_their_parent_hierarchy() {
+    let document = Document::parse("- first paragraph\n\n  continuation paragraph\n");
+
+    assert_eq!(document.blocks().len(), 2);
+    assert_eq!(
+        document.blocks()[0].kind(),
+        BlockKind::ListItem {
+            depth: 1,
+            marker: ListMarker::Unordered,
+            continuation: false,
+        }
+    );
+    assert_eq!(
+        document.blocks()[1].kind(),
+        BlockKind::ListItem {
+            depth: 1,
+            marker: ListMarker::Unordered,
+            continuation: true,
+        }
+    );
+    assert_eq!(document.blocks()[0].text(), "first paragraph");
+    assert_eq!(document.blocks()[1].text(), "continuation paragraph");
 }
