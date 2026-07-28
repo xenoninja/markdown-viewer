@@ -1,0 +1,21 @@
+[package]
+name = "mdview"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A read-only terminal Markdown viewer"
+license = "MIT"
+
+[dependencies]
+crossterm = "0.29.0"
+pulldown-cmark = "0.13.4"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
+unicode-width = "0.2.2"
+
+[dev-dependencies]
+nix = { version = "0.31.3", features = ["fs", "process", "term"] }
+tempfile = "3.27.0"
+
+[profile.release]
+strip = true
+lto = "thin"
