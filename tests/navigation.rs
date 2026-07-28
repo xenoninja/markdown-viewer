@@ -299,3 +299,45 @@ fn reading_cursor_remains_visible_on_inline_code() {
     );
     assert!(harness.cursor_is_highlighted());
 }
+
+#[test]
+fn reading_cursor_reveals_long_code_with_independent_horizontal_viewports() {
+    let document = Document::parse("```\nabcdefghijklmnop\n```\n\n```\n0123456789abcdef\n```\n");
+    let mut harness = Harness::new(document, 8, 2);
+
+    assert_eq!(harness.frame(), "abcdefgh\n01234567");
+
+    harness.keys("10l");
+    assert_eq!(harness.frame(), "defghijk\n01234567");
+    assert!(harness.cursor_is_highlighted());
+
+    harness.keys("j");
+    assert_eq!(
+        harness.frame(),
+        "defghijk\n01234567",
+        "moving into another code block leaves both viewports independent"
+    );
+
+    harness.keys("k");
+    assert_eq!(harness.frame(), "defghijk\n01234567");
+    assert!(harness.cursor_is_highlighted());
+}
+
+#[test]
+fn vertical_code_motion_reveals_a_short_line_after_horizontal_scrolling() {
+    let document = Document::parse("```\nabcdefghijklmnop\nxy\n```\n");
+    let mut harness = Harness::new(document, 8, 2);
+    harness.keys("10l");
+
+    harness.keys("j");
+
+    assert_eq!(
+        harness.cursor(),
+        Some(SemanticPosition {
+            block: 0,
+            grapheme: 18,
+        })
+    );
+    assert!(harness.cursor_is_highlighted());
+    assert!(harness.frame().contains('y'));
+}

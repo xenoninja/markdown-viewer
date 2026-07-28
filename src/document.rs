@@ -1,6 +1,8 @@
 use std::fmt::Write as _;
 
-use pulldown_cmark::{Event, HeadingLevel as ParsedHeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    CodeBlockKind, Event, HeadingLevel as ParsedHeadingLevel, Options, Parser, Tag, TagEnd,
+};
 
 /// An owned, width-independent representation of a Markdown Document.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -13,6 +15,7 @@ pub struct Document {
 pub enum BlockKind {
     Paragraph,
     Heading(HeadingLevel),
+    Code,
     ThematicBreak,
     RawHtml,
     Empty,
@@ -53,6 +56,7 @@ pub struct Block {
     text: String,
     quote_depth: usize,
     list_item: Option<ListItem>,
+    language: Option<String>,
 }
 
 impl Block {
@@ -79,6 +83,12 @@ impl Block {
     #[must_use]
     pub fn list_item(&self) -> Option<ListItem> {
         self.list_item
+    }
+
+    /// The first fenced-code info token, when one was supplied.
+    #[must_use]
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_deref()
     }
 }
 
@@ -173,6 +183,24 @@ impl Document {
                         block_builder_for_item(&mut items, quote_depth, BlockKind::RawHtml)
                     });
                 }
+                Event::Start(Tag::CodeBlock(kind)) => {
+                    finish_builder(&mut builder, &mut blocks);
+                    let language = match kind {
+                        CodeBlockKind::Fenced(info) => info
+                            .split_whitespace()
+                            .next()
+                            .filter(|token| !token.is_empty())
+                            .map(make_inert),
+                        CodeBlockKind::Indented => None,
+                    };
+                    let mut code = if items.is_empty() {
+                        BlockBuilder::new(BlockKind::Code, quote_depth)
+                    } else {
+                        block_builder_for_item(&mut items, quote_depth, BlockKind::Code)
+                    };
+                    code.language = language;
+                    builder = Some(code);
+                }
                 Event::Start(Tag::BlockQuote(_)) => quote_depth += 1,
                 Event::Start(Tag::List(start)) => {
                     finish_builder(&mut builder, &mut blocks);
@@ -211,7 +239,12 @@ impl Document {
                         builder = Some(block_builder_for_leaf(&mut items, quote_depth));
                     }
                     if let Some(builder) = &mut builder {
-                        builder.push(&make_inert(&text), style, link_target.as_deref());
+                        let text = if builder.kind == BlockKind::Code {
+                            make_code_inert(&text)
+                        } else {
+                            make_inert(&text)
+                        };
+                        builder.push(&text, style, link_target.as_deref());
                     }
                 }
                 Event::Code(text) => {
@@ -234,7 +267,9 @@ impl Document {
                         builder.push("\n", style, link_target.as_deref());
                     }
                 }
-                Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::HtmlBlock) => {
+                Event::End(
+                    TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::HtmlBlock | TagEnd::CodeBlock,
+                ) => {
                     finish_builder(&mut builder, &mut blocks);
                 }
                 Event::End(TagEnd::BlockQuote(_)) => quote_depth = quote_depth.saturating_sub(1),
@@ -290,6 +325,7 @@ struct BlockBuilder {
     spans: Vec<InlineSpan>,
     quote_depth: usize,
     list_item: Option<ListItem>,
+    language: Option<String>,
 }
 
 impl BlockBuilder {
@@ -299,6 +335,7 @@ impl BlockBuilder {
             spans: Vec::new(),
             quote_depth,
             list_item: None,
+            language: None,
         }
     }
 
@@ -330,6 +367,7 @@ impl BlockBuilder {
             text,
             quote_depth: self.quote_depth,
             list_item: self.list_item,
+            language: self.language,
         }
     }
 }
@@ -418,6 +456,28 @@ fn make_inert(text: &str) -> String {
             _ => character,
         };
         inert.push(inert_character);
+    }
+
+    inert
+}
+
+fn make_code_inert(text: &str) -> String {
+    let mut inert = String::with_capacity(text.len());
+
+    for character in text.chars() {
+        match character {
+            '\n' | '\t' => inert.push(character),
+            '\r' => inert.push(' '),
+            '\u{00}'..='\u{1f}' => inert.push(
+                char::from_u32(u32::from(character) + 0x2400).expect("control picture exists"),
+            ),
+            '\u{7f}' => inert.push('␡'),
+            _ if character.is_control() => {
+                write!(inert, "\\u{{{:04X}}}", u32::from(character))
+                    .expect("writing to a String cannot fail");
+            }
+            _ => inert.push(character),
+        }
     }
 
     inert

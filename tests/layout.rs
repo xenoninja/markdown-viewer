@@ -209,6 +209,30 @@ fn supported_blocks_inside_lists_keep_layout_hierarchy() {
     );
 }
 
+#[test]
+fn code_keeps_lines_unwrapped_and_expands_tabs_at_four_column_stops() {
+    let document = Document::parse("```\n\tlet value = \"界界界\";\na\tb\n```\n");
+
+    let rendered = layout(&document, 8);
+    let rows = rendered
+        .rows()
+        .iter()
+        .map(mdview::RenderedRow::text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rows, ["    let value = \"界界界\";", "a   b"]);
+    assert!(
+        rendered.rows()[0].display_width() > 8,
+        "a long source line overflows instead of soft-wrapping"
+    );
+    let tab = rendered.rows()[0]
+        .cells()
+        .first()
+        .expect("tab is one semantic cell");
+    assert_eq!(tab.symbol(), "    ");
+    assert_eq!(tab.position().grapheme, 0);
+}
+
 fn reachable_positions(rendered: &mdview::RenderedDocument) -> BTreeSet<SemanticPosition> {
     rendered
         .rows()

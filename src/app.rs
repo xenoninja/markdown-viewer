@@ -4,11 +4,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::Document;
-use crate::layout::{CellLocation, RenderedDocument, SemanticPosition, layout};
+use crate::highlight::{CodeHighlighter, HighlightCache};
+use crate::layout::{CellLocation, RenderedDocument, SemanticPosition, layout, layout_with_state};
 use crate::source::{SourceError, load_document};
 use crate::ui;
 
@@ -22,24 +23,33 @@ pub struct ReadingSession {
     document: Document,
     cursor: Option<SemanticPosition>,
     viewport: usize,
+    horizontal_offsets: Vec<usize>,
     preferred_column: Option<usize>,
     pending_count: Option<usize>,
     pending_g: bool,
     quit: bool,
+    highlighting: HighlightCache,
 }
 
 impl ReadingSession {
     #[must_use]
     pub fn new(document: Document) -> Self {
+        Self::with_highlight_cache(document, HighlightCache::syntect())
+    }
+
+    fn with_highlight_cache(document: Document, highlighting: HighlightCache) -> Self {
         let cursor = layout(&document, 100).first_position();
+        let block_count = document.blocks().len();
         Self {
             document,
             cursor,
             viewport: 0,
+            horizontal_offsets: vec![0; block_count],
             preferred_column: None,
             pending_count: None,
             pending_g: false,
             quit: false,
+            highlighting,
         }
     }
 
@@ -131,7 +141,51 @@ impl ReadingSession {
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
-        self.ensure_cursor_visible(&layout(&self.document, width), height);
+        if let Some(cursor) = self.cursor {
+            self.ensure_code_cursor_visible(width, cursor);
+        }
+        let rendered = self.rendered(width);
+        self.ensure_cursor_visible(&rendered, height);
+    }
+
+    pub(crate) fn rendered(&self, width: u16) -> RenderedDocument {
+        layout_with_state(
+            &self.document,
+            width,
+            &self.horizontal_offsets,
+            self.highlighting.styles(),
+        )
+    }
+
+    pub(crate) fn prepare_highlighting(&mut self, width: u16, height: u16) {
+        self.highlighting.collect();
+        let rendered = self.rendered(width);
+        let margin = usize::from(height.max(1));
+        let first_row = self.viewport.saturating_sub(margin);
+        let last_row = self
+            .viewport
+            .saturating_add(margin.saturating_mul(2))
+            .min(rendered.rows().len());
+        let mut blocks = rendered.rows()[first_row.min(last_row)..last_row]
+            .iter()
+            .map(crate::RenderedRow::block)
+            .collect::<Vec<_>>();
+        blocks.sort_unstable();
+        blocks.dedup();
+
+        for block_index in blocks {
+            let block = &self.document.blocks()[block_index];
+            if block.kind() == crate::BlockKind::Code
+                && let Some(language) = block.language()
+            {
+                self.highlighting
+                    .request(block_index, language, block.text());
+            }
+        }
+    }
+
+    pub(crate) fn highlighting_pending(&self) -> bool {
+        self.highlighting.is_pending()
     }
 
     fn control(&mut self, character: char, width: u16, height: u16) {
@@ -146,14 +200,14 @@ impl ReadingSession {
             'd' => self.motion(width, height, Motion::Down, half_page_distance),
             'b' => self.motion(width, height, Motion::Up, page_distance),
             'f' => self.motion(width, height, Motion::Down, page_distance),
-            'e' => self.scroll(&layout(&self.document, width), height, scroll_distance),
-            'y' => self.scroll(&layout(&self.document, width), height, -scroll_distance),
+            'e' => self.scroll(&self.rendered(width), height, scroll_distance),
+            'y' => self.scroll(&self.rendered(width), height, -scroll_distance),
             _ => {}
         }
     }
 
     fn motion(&mut self, width: u16, height: u16, motion: Motion, count: usize) {
-        let rendered = layout(&self.document, width);
+        let rendered = self.rendered(width);
         let Some(cursor) = self.cursor else {
             return;
         };
@@ -217,12 +271,14 @@ impl ReadingSession {
 
         if let Some(target) = target {
             self.cursor = Some(target);
+            self.ensure_code_cursor_visible(width, target);
         }
+        let rendered = self.rendered(width);
         self.ensure_cursor_visible(&rendered, height);
     }
 
     fn document_row(&mut self, width: u16, height: u16, count: Option<usize>, end: bool) {
-        let rendered = layout(&self.document, width);
+        let rendered = self.rendered(width);
         self.preferred_column = None;
         self.cursor = match count {
             Some(count) if count > 0 && (end || count > 1) => rendered
@@ -235,6 +291,10 @@ impl ReadingSession {
             _ if end => rendered.last_position(),
             _ => rendered.first_position(),
         };
+        if let Some(cursor) = self.cursor {
+            self.ensure_code_cursor_visible(width, cursor);
+        }
+        let rendered = self.rendered(width);
         self.ensure_cursor_visible(&rendered, height);
     }
 
@@ -260,6 +320,38 @@ impl ReadingSession {
             self.viewport = row;
         } else if row >= self.viewport + height {
             self.viewport = row + 1 - height;
+        }
+    }
+
+    fn ensure_code_cursor_visible(&mut self, width: u16, cursor: SemanticPosition) {
+        if self.document.blocks()[cursor.block].kind() != crate::BlockKind::Code {
+            return;
+        }
+
+        let rendered = layout(&self.document, width);
+        let Some(location) = rendered.cell_for_position(cursor) else {
+            return;
+        };
+        let row = &rendered.rows()[location.row];
+        let available_width = usize::from(width.max(1))
+            .saturating_sub(row.column())
+            .max(1);
+        let cell_start = location.column.saturating_sub(row.column());
+        let cell_end = cell_start + location.width;
+        let offset = &mut self.horizontal_offsets[cursor.block];
+
+        if cell_start < *offset {
+            *offset = cell_start;
+        } else if cell_end > offset.saturating_add(available_width) {
+            let minimum_offset = cell_end.saturating_sub(available_width);
+            let mut boundary = 0;
+            for cell in row.cells() {
+                if boundary >= minimum_offset {
+                    break;
+                }
+                boundary += cell.width();
+            }
+            *offset = boundary.min(cell_start);
         }
     }
 
@@ -445,12 +537,30 @@ pub struct Harness {
 impl Harness {
     #[must_use]
     pub fn new(document: Document, width: u16, height: u16) -> Self {
+        Self::with_session(ReadingSession::new(document), width, height)
+    }
+
+    #[must_use]
+    pub fn with_highlighter(
+        document: Document,
+        width: u16,
+        height: u16,
+        highlighter: impl CodeHighlighter,
+    ) -> Self {
+        Self::with_session(
+            ReadingSession::with_highlight_cache(
+                document,
+                HighlightCache::with_highlighter(highlighter),
+            ),
+            width,
+            height,
+        )
+    }
+
+    fn with_session(session: ReadingSession, width: u16, height: u16) -> Self {
         let backend = TestBackend::new(width, height);
         let terminal = Terminal::new(backend).expect("TestBackend is infallible");
-        let mut harness = Self {
-            session: ReadingSession::new(document),
-            terminal,
-        };
+        let mut harness = Self { session, terminal };
         harness.draw();
         harness
     }
@@ -527,12 +637,47 @@ impl Harness {
         Some(self.terminal.backend().buffer()[(column, row)].modifier)
     }
 
+    #[must_use]
+    pub fn foreground_at(&self, position: SemanticPosition) -> Option<Color> {
+        let location = self.screen_cell(position)?;
+        let column = u16::try_from(location.column).ok()?;
+        let row = u16::try_from(location.row).ok()?;
+        Some(self.terminal.backend().buffer()[(column, row)].fg)
+    }
+
+    #[must_use]
+    pub fn highlight_at(&self, position: SemanticPosition) -> Option<crate::HighlightStyle> {
+        let area = self.terminal.backend().buffer().area;
+        self.session
+            .rendered(area.width)
+            .rows()
+            .iter()
+            .flat_map(|row| row.cells())
+            .find(|cell| cell.position() == position)
+            .and_then(|cell| cell.style().highlight())
+    }
+
+    pub fn settle_highlighting(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while self.session.highlighting_pending() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+            self.draw();
+        }
+        assert!(
+            !self.session.highlighting_pending(),
+            "highlighting did not settle within ten seconds"
+        );
+        self.draw();
+    }
+
     fn screen_cell(&self, position: SemanticPosition) -> Option<CellLocation> {
         let area = self.terminal.backend().buffer().area;
-        let mut location =
-            layout(self.session.document(), area.width).cell_for_position(position)?;
+        let mut location = self
+            .session
+            .rendered(area.width)
+            .cell_for_position(position)?;
         let screen_row = location.row.checked_sub(self.session.viewport())?;
-        if screen_row >= usize::from(area.height) {
+        if screen_row >= usize::from(area.height) || location.column >= usize::from(area.width) {
             return None;
         }
         location.row = screen_row;
@@ -555,6 +700,8 @@ impl Harness {
     }
 
     fn draw(&mut self) {
+        let area = self.terminal.backend().buffer().area;
+        self.session.prepare_highlighting(area.width, area.height);
         self.terminal
             .draw(|frame| ui::render(frame, &self.session))
             .expect("TestBackend is infallible");

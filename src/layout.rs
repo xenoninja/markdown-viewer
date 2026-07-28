@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::highlight::HighlightStyle;
 use crate::{Block, BlockKind, Document, HeadingLevel, InlineStyle, ListMarker};
 
 const MAX_PROSE_WIDTH: usize = 100;
@@ -27,6 +30,8 @@ pub struct CellStyle {
     heading_level: Option<HeadingLevel>,
     inline: InlineStyle,
     link: bool,
+    code: bool,
+    highlight: Option<HighlightStyle>,
     thematic_break: bool,
 }
 
@@ -62,6 +67,16 @@ impl CellStyle {
     }
 
     #[must_use]
+    pub fn is_code(self) -> bool {
+        self.code
+    }
+
+    #[must_use]
+    pub fn highlight(self) -> Option<HighlightStyle> {
+        self.highlight
+    }
+
+    #[must_use]
     pub fn is_thematic_break(self) -> bool {
         self.thematic_break
     }
@@ -74,8 +89,15 @@ impl CellStyle {
             },
             inline,
             link,
+            code: kind == BlockKind::Code,
+            highlight: None,
             thematic_break: kind == BlockKind::ThematicBreak,
         }
+    }
+
+    fn with_highlight(mut self, highlight: Option<HighlightStyle>) -> Self {
+        self.highlight = highlight;
+        self
     }
 }
 
@@ -127,6 +149,15 @@ pub struct RenderedRow {
     cells: Vec<RenderedCell>,
     column: usize,
     leading: String,
+    horizontal_offset: usize,
+    block: usize,
+}
+
+struct CellProjection<'a> {
+    cell: &'a RenderedCell,
+    content_column: usize,
+    visible_column: Option<usize>,
+    clipped_width: usize,
 }
 
 impl RenderedRow {
@@ -138,7 +169,8 @@ impl RenderedRow {
     #[must_use]
     pub fn text(&self) -> String {
         let mut text = self.leading.clone();
-        text.extend(self.cells().iter().map(RenderedCell::symbol));
+        text.push_str(&" ".repeat(self.clipped_prefix_width()));
+        text.extend(self.visible_cells().map(RenderedCell::symbol));
         text
     }
 
@@ -159,7 +191,54 @@ impl RenderedRow {
 
     #[must_use]
     pub fn display_width(&self) -> usize {
-        self.leading_width() + cells_width(&self.cells)
+        self.leading_width() + cells_width(&self.cells).saturating_sub(self.horizontal_offset)
+    }
+
+    #[must_use]
+    pub fn horizontal_offset(&self) -> usize {
+        self.horizontal_offset
+    }
+
+    #[must_use]
+    pub fn block(&self) -> usize {
+        self.block
+    }
+
+    pub(crate) fn visible_cells(&self) -> impl Iterator<Item = &RenderedCell> {
+        self.projected_cells()
+            .filter(|projection| projection.visible_column.is_some())
+            .map(|projection| projection.cell)
+    }
+
+    pub(crate) fn clipped_prefix_width(&self) -> usize {
+        self.projected_cells()
+            .map(|projection| projection.clipped_width)
+            .find(|width| *width > 0)
+            .unwrap_or_default()
+    }
+
+    fn projected_cells(&self) -> impl Iterator<Item = CellProjection<'_>> {
+        let mut content_column = 0;
+        self.cells.iter().map(move |cell| {
+            let start = content_column;
+            let end = start + cell.width;
+            content_column = end;
+            let visible_column = if start >= self.horizontal_offset {
+                Some(self.column + start - self.horizontal_offset)
+            } else {
+                None
+            };
+            CellProjection {
+                cell,
+                content_column: start,
+                visible_column,
+                clipped_width: if start < self.horizontal_offset && end > self.horizontal_offset {
+                    end - self.horizontal_offset
+                } else {
+                    0
+                },
+            }
+        })
     }
 }
 
@@ -184,17 +263,15 @@ impl RenderedDocument {
     #[must_use]
     pub fn cell_for_position(&self, position: SemanticPosition) -> Option<CellLocation> {
         self.rows.iter().enumerate().find_map(|(row_index, row)| {
-            let mut column = row.column;
-            for cell in &row.cells {
-                if cell.position == position {
+            for projection in row.projected_cells() {
+                if projection.cell.position == position {
                     return Some(CellLocation {
                         row: row_index,
-                        column,
-                        width: cell.width,
+                        column: projection.visible_column?,
+                        width: projection.cell.width,
                         position,
                     });
                 }
-                column += cell.width;
             }
             None
         })
@@ -203,13 +280,14 @@ impl RenderedDocument {
     #[must_use]
     pub fn position_at(&self, row: usize, column: usize) -> Option<SemanticPosition> {
         let row = self.rows.get(row)?;
-        let mut cell_column = row.column;
-        for cell in &row.cells {
-            let width = cell.width.max(1);
-            if (cell_column..cell_column + width).contains(&column) {
-                return Some(cell.position);
+        for projection in row.projected_cells() {
+            let Some(visible_column) = projection.visible_column else {
+                continue;
+            };
+            let width = projection.cell.width.max(1);
+            if (visible_column..visible_column + width).contains(&column) {
+                return Some(projection.cell.position);
             }
-            cell_column += cell.width;
         }
         None
     }
@@ -241,16 +319,20 @@ impl RenderedDocument {
     #[must_use]
     pub fn nearest_position(&self, row: usize, column: usize) -> Option<SemanticPosition> {
         let row = self.rows.get(row)?;
-        let mut cell_column = row.column;
+        let target_column = column
+            .saturating_sub(row.column)
+            .saturating_add(row.horizontal_offset);
         let mut nearest = None;
-        for cell in &row.cells {
-            if cell.is_navigable() {
-                let candidate = (cell_column.abs_diff(column), cell.position);
+        for projection in row.projected_cells() {
+            if projection.cell.is_navigable() {
+                let candidate = (
+                    projection.content_column.abs_diff(target_column),
+                    projection.cell.position,
+                );
                 if nearest.is_none_or(|current| candidate < current) {
                     nearest = Some(candidate);
                 }
             }
-            cell_column += cell.width;
         }
         nearest.map(|(_, position)| position)
     }
@@ -258,6 +340,23 @@ impl RenderedDocument {
 
 #[must_use]
 pub fn layout(document: &Document, width: u16) -> RenderedDocument {
+    layout_with_offsets(document, width, &[])
+}
+
+pub(crate) fn layout_with_offsets(
+    document: &Document,
+    width: u16,
+    horizontal_offsets: &[usize],
+) -> RenderedDocument {
+    layout_with_state(document, width, horizontal_offsets, &HashMap::new())
+}
+
+pub(crate) fn layout_with_state(
+    document: &Document,
+    width: u16,
+    horizontal_offsets: &[usize],
+    highlights: &HashMap<usize, Vec<HighlightStyle>>,
+) -> RenderedDocument {
     let pane_width = usize::from(width.max(1));
     let content_width = pane_width.min(MAX_PROSE_WIDTH);
     let base_column = pane_width.saturating_sub(content_width) / 2;
@@ -266,6 +365,21 @@ pub fn layout(document: &Document, width: u16) -> RenderedDocument {
     for (block_index, block) in document.blocks().iter().enumerate() {
         let leading = block_leading(block);
         let leading_width = UnicodeWidthStr::width(leading.as_str());
+        if block.kind() == BlockKind::Code {
+            layout_code(
+                block,
+                block_index,
+                leading_width,
+                &leading,
+                horizontal_offsets
+                    .get(block_index)
+                    .copied()
+                    .unwrap_or_default(),
+                highlights.get(&block_index).map(Vec::as_slice),
+                &mut rows,
+            );
+            continue;
+        }
         let block_width = content_width.saturating_sub(leading_width).max(1);
         if block.kind() == BlockKind::ThematicBreak {
             layout_thematic_break(
@@ -289,6 +403,78 @@ pub fn layout(document: &Document, width: u16) -> RenderedDocument {
     RenderedDocument {
         rows,
         content_width,
+    }
+}
+
+fn layout_code(
+    block: &Block,
+    block_index: usize,
+    column: usize,
+    leading: &str,
+    horizontal_offset: usize,
+    highlights: Option<&[HighlightStyle]>,
+    rows: &mut Vec<RenderedRow>,
+) {
+    let first_code_row = rows.len();
+    let mut row = Vec::new();
+    let mut source_column = 0;
+    let mut grapheme = 0;
+    let mut ended_with_newline = false;
+
+    for span in block.spans() {
+        let style = CellStyle::from_semantics(block.kind(), span.style(), false);
+        for symbol in span.text().graphemes(true) {
+            let position = SemanticPosition {
+                block: block_index,
+                grapheme,
+            };
+            grapheme += 1;
+
+            if symbol == "\n" {
+                rows.push(RenderedRow {
+                    cells: std::mem::take(&mut row),
+                    column,
+                    leading: leading.to_owned(),
+                    horizontal_offset,
+                    block: block_index,
+                });
+                source_column = 0;
+                ended_with_newline = true;
+                continue;
+            }
+
+            ended_with_newline = false;
+            let display_symbol = if symbol == "\t" {
+                " ".repeat(4 - source_column % 4)
+            } else if UnicodeWidthStr::width(symbol) == 0
+                && !symbol.chars().all(char::is_whitespace)
+            {
+                format!("◌{symbol}")
+            } else {
+                symbol.to_owned()
+            };
+            let width = UnicodeWidthStr::width(display_symbol.as_str());
+            source_column += width;
+            row.push(RenderedCell {
+                symbol: display_symbol,
+                position,
+                width,
+                style: style.with_highlight(
+                    highlights.and_then(|styles| styles.get(position.grapheme).copied()),
+                ),
+                link_target: None,
+            });
+        }
+    }
+
+    if !ended_with_newline || rows.len() == first_code_row {
+        rows.push(RenderedRow {
+            cells: row,
+            column,
+            leading: leading.to_owned(),
+            horizontal_offset,
+            block: block_index,
+        });
     }
 }
 
@@ -347,6 +533,8 @@ fn layout_thematic_break(
         }],
         column,
         leading,
+        horizontal_offset: 0,
+        block,
     });
 }
 
@@ -376,6 +564,8 @@ fn layout_empty_list_item(
         }],
         column,
         leading,
+        horizontal_offset: 0,
+        block: block_index,
     });
 }
 
@@ -507,10 +697,13 @@ fn push_row_if_populated(
     rows: &mut Vec<RenderedRow>,
 ) {
     if !row.is_empty() {
+        let block = row[0].position.block;
         rows.push(RenderedRow {
             cells: std::mem::take(row),
             column,
             leading: leading.to_owned(),
+            horizontal_offset: 0,
+            block,
         });
     }
 }

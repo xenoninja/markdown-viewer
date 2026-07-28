@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
@@ -8,8 +8,9 @@ use crate::app::ReadingSession;
 use crate::layout;
 
 pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
-    let rendered = layout::layout(session.document(), frame.area().width);
+    let rendered = session.rendered(frame.area().width);
     let cursor = session.cursor();
+    let color_enabled = std::env::var_os("NO_COLOR").is_none();
     let lines = rendered
         .rows()
         .iter()
@@ -27,8 +28,11 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
                     Style::new().add_modifier(Modifier::DIM),
                 ));
             }
-            spans.extend(row.cells().iter().map(|cell| {
-                let mut style = cell_style(cell.style());
+            if row.clipped_prefix_width() > 0 {
+                spans.push(Span::raw(" ".repeat(row.clipped_prefix_width())));
+            }
+            spans.extend(row.visible_cells().map(|cell| {
+                let mut style = cell_style(cell.style(), color_enabled);
                 if Some(cell.position()) == cursor {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
@@ -41,7 +45,7 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
     frame.render_widget(Paragraph::new(Text::from(lines)), frame.area());
 }
 
-fn cell_style(semantic: layout::CellStyle) -> Style {
+fn cell_style(semantic: layout::CellStyle, color_enabled: bool) -> Style {
     let mut modifiers = Modifier::empty();
     modifiers |= match semantic.heading_level() {
         Some(HeadingLevel::H1) => Modifier::BOLD | Modifier::UNDERLINED,
@@ -70,5 +74,20 @@ fn cell_style(semantic: layout::CellStyle) -> Style {
     if semantic.is_thematic_break() {
         modifiers |= Modifier::DIM;
     }
-    Style::new().add_modifier(modifiers)
+    let mut style = Style::new().add_modifier(modifiers);
+    if let Some(highlight) = semantic.highlight() {
+        if highlight.is_bold() {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if highlight.is_italic() {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        if highlight.is_underlined() {
+            style = style.add_modifier(Modifier::UNDERLINED);
+        }
+        if color_enabled && let Some((red, green, blue)) = highlight.foreground() {
+            style = style.fg(Color::Rgb(red, green, blue));
+        }
+    }
+    style
 }

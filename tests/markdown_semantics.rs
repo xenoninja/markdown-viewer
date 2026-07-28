@@ -264,3 +264,30 @@ fn supported_blocks_and_empty_parents_keep_list_context() {
     assert_eq!(document.blocks()[3].kind(), BlockKind::Paragraph);
     assert_eq!(document.blocks()[3].text(), "child");
 }
+
+#[test]
+fn fenced_and_indented_code_preserve_source_text_and_language_token() {
+    let document = Document::parse(
+        "```rust linenos=1\nfn main() {\n\tprintln!(\"界\");\n}\n```\n\n    indented\n    \tcode\n",
+    );
+
+    assert_eq!(document.blocks().len(), 2);
+    assert_eq!(document.blocks()[0].kind(), BlockKind::Code);
+    assert_eq!(document.blocks()[0].language(), Some("rust"));
+    assert_eq!(
+        document.blocks()[0].text(),
+        "fn main() {\n\tprintln!(\"界\");\n}\n"
+    );
+    assert_eq!(document.blocks()[1].kind(), BlockKind::Code);
+    assert_eq!(document.blocks()[1].language(), None);
+    assert_eq!(document.blocks()[1].text(), "indented\n\tcode\n");
+}
+
+#[test]
+fn code_keeps_layout_controls_but_renders_terminal_controls_inert() {
+    let document = Document::parse("```text\n\tbefore \u{1b}[2J after\u{7}\n```\n");
+
+    assert_eq!(document.blocks()[0].text(), "\tbefore ␛[2J after␇\n");
+    assert!(!document.blocks()[0].text().contains('\u{1b}'));
+    assert!(!document.blocks()[0].text().contains('\u{7}'));
+}

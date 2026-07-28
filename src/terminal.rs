@@ -1,4 +1,5 @@
 use std::io::{self, IsTerminal, stdin, stdout};
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::fs::OpenOptions;
@@ -32,13 +33,22 @@ pub fn run_reading_session(document: Document) -> io::Result<()> {
     let mut session = ReadingSession::new(document);
 
     while !session.has_quit() {
+        let area = terminal.size()?;
+        session.prepare_highlighting(area.width, area.height);
         terminal.draw(|frame| ui::render(frame, &session))?;
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
+        let next_event = if session.highlighting_pending() {
+            event::poll(Duration::from_millis(16))?
+                .then(event::read)
+                .transpose()?
+        } else {
+            Some(event::read()?)
+        };
+        match next_event {
+            Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                 let area = terminal.size()?;
                 session.key(key, area.width, area.height);
             }
-            Event::Resize(width, height) => session.resize(width, height),
+            Some(Event::Resize(width, height)) => session.resize(width, height),
             _ => {}
         }
     }

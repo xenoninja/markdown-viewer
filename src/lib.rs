@@ -1,5 +1,6 @@
 mod app;
 mod document;
+mod highlight;
 mod layout;
 mod source;
 mod terminal;
@@ -9,6 +10,7 @@ pub use app::{Command, Harness, ReadingSession};
 pub use document::{
     Block, BlockKind, Document, HeadingLevel, InlineSpan, InlineStyle, ListItem, ListMarker,
 };
+pub use highlight::{CodeHighlighter, HighlightStyle};
 pub use layout::{
     CellLocation, CellStyle, RenderedDocument, RenderedRow, SemanticPosition, layout,
 };
