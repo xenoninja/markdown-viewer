@@ -12,7 +12,7 @@ use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::pty::{Winsize, openpty};
 use nix::sys::termios::{LocalFlags, tcgetattr};
 use nix::unistd::dup;
-use support::{contains, read_available};
+use support::{contains, contains_rendered_text, read_available};
 use tempfile::tempdir;
 
 #[test]
@@ -74,7 +74,7 @@ fn reading_session_enters_and_restores_the_terminal() {
     assert!(contains(&output, b"\x1b[?25l"), "cursor hidden");
     assert!(contains(&output, b"\x1b[?25h"), "cursor restored");
     assert!(
-        contains(&output, b"PTY") && contains(&output, b"paragraph"),
+        contains_rendered_text(&output, b"PTY") && contains_rendered_text(&output, b"paragraph"),
         "Document rendered; PTY output: {output:?}"
     );
     assert_eq!(

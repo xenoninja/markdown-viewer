@@ -16,7 +16,7 @@ use nix::pty::{ForkptyResult, Winsize, forkpty};
 use nix::sys::termios::{Termios, tcgetattr};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::{Pid, pipe};
-use support::{contains, read_available};
+use support::{contains, contains_rendered_text, read_available};
 
 static PTY_TEST: Mutex<()> = Mutex::new(());
 
@@ -39,9 +39,9 @@ fn piped_document_uses_the_controlling_terminal_for_interaction() {
 
     assert!(exited_successfully(status), "PTY output: {output:?}");
     assert!(
-        contains(&output, b"Piped")
-            && contains(&output, b"Markdown")
-            && contains(&output, b"paragraph"),
+        contains_rendered_text(&output, b"Piped")
+            && contains_rendered_text(&output, b"Markdown")
+            && contains_rendered_text(&output, b"paragraph"),
         "Document rendered; PTY output: {output:?}"
     );
     assert!(contains(&output, b"\x1b[?1049h"), "alternate screen entry");
@@ -69,9 +69,9 @@ fn dash_explicitly_selects_a_piped_document() {
 
     assert!(exited_successfully(status), "PTY output: {output:?}");
     assert!(
-        contains(&output, b"Explicit")
-            && contains(&output, b"standard")
-            && contains(&output, b"input"),
+        contains_rendered_text(&output, b"Explicit")
+            && contains_rendered_text(&output, b"standard")
+            && contains_rendered_text(&output, b"input"),
         "Document rendered; PTY output: {output:?}"
     );
 }
@@ -108,10 +108,10 @@ fn reading_session_opens_only_after_the_complete_stream_arrives() {
 
     assert!(exited_successfully(status), "PTY output: {output:?}");
     assert!(
-        contains(&output, b"Complete")
-            && contains(&output, b"stream")
-            && contains(&output, b"before")
-            && contains(&output, b"opening"),
+        contains_rendered_text(&output, b"Complete")
+            && contains_rendered_text(&output, b"stream")
+            && contains_rendered_text(&output, b"before")
+            && contains_rendered_text(&output, b"opening"),
         "complete Document rendered; PTY output: {output:?}"
     );
 }

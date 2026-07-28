@@ -405,6 +405,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "tempfile",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

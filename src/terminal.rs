@@ -6,7 +6,7 @@ use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
 
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -15,7 +15,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::Document;
-use crate::app::{Command, ReadingSession};
+use crate::app::ReadingSession;
 use crate::ui;
 
 pub fn run_reading_session(document: Document) -> io::Result<()> {
@@ -33,11 +33,13 @@ pub fn run_reading_session(document: Document) -> io::Result<()> {
 
     while !session.has_quit() {
         terminal.draw(|frame| ui::render(frame, &session))?;
-        if let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-            && key.code == KeyCode::Char('q')
-        {
-            session.command(Command::Quit);
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let area = terminal.size()?;
+                session.key(key, area.width, area.height);
+            }
+            Event::Resize(width, height) => session.resize(width, height),
+            _ => {}
         }
     }
 

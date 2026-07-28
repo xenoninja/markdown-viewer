@@ -9,6 +9,27 @@ pub fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+pub fn contains_rendered_text(output: &[u8], expected: &[u8]) -> bool {
+    let mut visible = Vec::with_capacity(output.len());
+    let mut index = 0;
+    while index < output.len() {
+        if output[index] == b'\x1b' && output.get(index + 1) == Some(&b'[') {
+            index += 2;
+            while index < output.len() {
+                let byte = output[index];
+                index += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+        } else {
+            visible.push(output[index]);
+            index += 1;
+        }
+    }
+    contains(&visible, expected)
+}
+
 pub fn read_available(terminal: &mut File, output: &mut Vec<u8>) {
     loop {
         let mut chunk = [0_u8; 4096];
