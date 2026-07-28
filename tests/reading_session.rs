@@ -61,3 +61,23 @@ fn displays_raw_html_literally() {
 
     assert!(harness.frame().contains("<aside>literal</aside>"));
 }
+
+#[test]
+fn reads_common_github_markdown_as_a_rendered_document() {
+    let document = mdview::Document::parse(
+        "## Title\n\nPlain *emphasis*, **strong**, and ~~old~~.\n\n> Use `cargo test` and [read more](https://example.com).\n\n- item\n  - [x] done\n\n---\n",
+    );
+    let harness = Harness::new(document, 48, 12);
+    let frame = harness.frame();
+
+    assert!(frame.contains("Title"));
+    assert!(frame.contains("Plain emphasis, strong, and old."));
+    assert!(frame.contains("│ Use cargo test and read more."));
+    assert!(frame.contains("• item"));
+    assert!(frame.contains("  ☑ done"));
+    assert!(frame.contains("────────"));
+    assert!(!frame.contains("https://example.com"));
+    assert!(!frame.contains("##"));
+    assert!(!frame.contains("**"));
+    assert!(!frame.contains("~~"));
+}

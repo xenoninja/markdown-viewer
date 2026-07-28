@@ -6,7 +6,9 @@ mod terminal;
 mod ui;
 
 pub use app::{Command, Harness, ReadingSession};
-pub use document::{Block, Document};
-pub use layout::{CellLocation, RenderedDocument, RenderedRow, SemanticPosition, layout};
+pub use document::{Block, BlockKind, Document, InlineSpan, InlineStyle, ListMarker};
+pub use layout::{
+    CellLocation, CellStyle, RenderedDocument, RenderedRow, SemanticPosition, layout,
+};
 pub use source::{SourceError, load_document, load_standard_input};
 pub use terminal::run_reading_session;

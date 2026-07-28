@@ -1,4 +1,4 @@
-use mdview::{Document, Harness, SemanticPosition};
+use mdview::{Document, Harness, SemanticPosition, layout};
 
 #[test]
 fn reading_cursor_is_visible_and_moves_by_unicode_grapheme() {
@@ -248,4 +248,36 @@ fn large_counts_clamp_at_document_ends() {
             grapheme: 0,
         })
     );
+}
+
+#[test]
+fn reading_cursor_visits_all_semantic_constructs_and_skips_decoration() {
+    let document = Document::parse(
+        "# Heading\n\n> quote `code`\n\n---\n\n- item\n  - [x] task\n\nsoft  \nhard [link](https://example.com)\n",
+    );
+    let rendered = layout(&document, 40);
+    let expected = rendered
+        .rows()
+        .iter()
+        .flat_map(|row| row.cells())
+        .filter(|cell| cell.is_navigable())
+        .map(|cell| cell.position())
+        .collect::<Vec<_>>();
+    let quote_row = rendered
+        .rows()
+        .iter()
+        .position(|row| row.text().starts_with('│'))
+        .expect("quote row");
+    let quote_content_column = rendered.rows()[quote_row].column();
+    assert_eq!(
+        rendered.position_at(quote_row, quote_content_column - 1),
+        None,
+        "blockquote border is decorative"
+    );
+
+    let mut harness = Harness::new(document, 40, 20);
+    for position in expected {
+        assert_eq!(harness.cursor(), Some(position));
+        harness.keys("l");
+    }
 }

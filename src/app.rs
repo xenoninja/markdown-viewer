@@ -7,10 +7,10 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::Document;
 use crate::layout::{CellLocation, RenderedDocument, SemanticPosition, layout};
 use crate::source::{SourceError, load_document};
 use crate::ui;
-use crate::{Block, Document};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
@@ -336,10 +336,9 @@ fn semantic_graphemes(document: &Document) -> Vec<(SemanticPosition, &str)> {
         .iter()
         .enumerate()
         .flat_map(|(block, content)| {
-            let text = match content {
-                Block::Paragraph(text) | Block::RawHtml(text) => text,
-            };
-            text.graphemes(true)
+            content
+                .text()
+                .graphemes(true)
                 .enumerate()
                 .map(move |(grapheme, text)| (SemanticPosition { block, grapheme }, text))
         })

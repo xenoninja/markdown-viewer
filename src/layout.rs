@@ -1,7 +1,7 @@
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::{Block, Document};
+use crate::{Block, BlockKind, Document, InlineStyle};
 
 const MAX_PROSE_WIDTH: usize = 100;
 
@@ -21,12 +21,78 @@ pub struct CellLocation {
     pub position: SemanticPosition,
 }
 
+/// Semantic presentation carried by a rendered cell.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CellStyle {
+    heading_level: Option<u8>,
+    emphasis: bool,
+    strong: bool,
+    strikethrough: bool,
+    inline_code: bool,
+    link: bool,
+    thematic_break: bool,
+}
+
+impl CellStyle {
+    #[must_use]
+    pub fn heading_level(self) -> Option<u8> {
+        self.heading_level
+    }
+
+    #[must_use]
+    pub fn is_emphasis(self) -> bool {
+        self.emphasis
+    }
+
+    #[must_use]
+    pub fn is_strong(self) -> bool {
+        self.strong
+    }
+
+    #[must_use]
+    pub fn is_strikethrough(self) -> bool {
+        self.strikethrough
+    }
+
+    #[must_use]
+    pub fn is_inline_code(self) -> bool {
+        self.inline_code
+    }
+
+    #[must_use]
+    pub fn is_link(self) -> bool {
+        self.link
+    }
+
+    #[must_use]
+    pub fn is_thematic_break(self) -> bool {
+        self.thematic_break
+    }
+
+    fn from_semantics(kind: BlockKind, inline: InlineStyle, link: bool) -> Self {
+        Self {
+            heading_level: match kind {
+                BlockKind::Heading(level) => Some(level),
+                _ => None,
+            },
+            emphasis: inline.is_emphasis(),
+            strong: inline.is_strong(),
+            strikethrough: inline.is_strikethrough(),
+            inline_code: inline.is_inline_code(),
+            link,
+            thematic_break: kind == BlockKind::ThematicBreak,
+        }
+    }
+}
+
 /// One piece of semantic content placed into a rendered row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenderedCell {
     symbol: String,
     position: SemanticPosition,
     width: usize,
+    style: CellStyle,
+    link_target: Option<String>,
 }
 
 impl RenderedCell {
@@ -46,6 +112,16 @@ impl RenderedCell {
     }
 
     #[must_use]
+    pub fn style(&self) -> CellStyle {
+        self.style
+    }
+
+    #[must_use]
+    pub fn link_target(&self) -> Option<&str> {
+        self.link_target.as_deref()
+    }
+
+    #[must_use]
     pub fn is_navigable(&self) -> bool {
         !self.symbol.chars().all(char::is_whitespace)
     }
@@ -56,6 +132,7 @@ impl RenderedCell {
 pub struct RenderedRow {
     cells: Vec<RenderedCell>,
     column: usize,
+    leading: String,
 }
 
 impl RenderedRow {
@@ -66,10 +143,9 @@ impl RenderedRow {
 
     #[must_use]
     pub fn text(&self) -> String {
-        self.cells()
-            .iter()
-            .map(RenderedCell::symbol)
-            .collect::<String>()
+        let mut text = self.leading.clone();
+        text.extend(self.cells().iter().map(RenderedCell::symbol));
+        text
     }
 
     #[must_use]
@@ -78,8 +154,18 @@ impl RenderedRow {
     }
 
     #[must_use]
+    pub fn leading(&self) -> &str {
+        &self.leading
+    }
+
+    #[must_use]
+    pub fn leading_width(&self) -> usize {
+        UnicodeWidthStr::width(self.leading.as_str())
+    }
+
+    #[must_use]
     pub fn display_width(&self) -> usize {
-        cells_width(&self.cells)
+        self.leading_width() + cells_width(&self.cells)
     }
 }
 
@@ -180,15 +266,15 @@ impl RenderedDocument {
 pub fn layout(document: &Document, width: u16) -> RenderedDocument {
     let pane_width = usize::from(width.max(1));
     let content_width = pane_width.min(MAX_PROSE_WIDTH);
-    let column = pane_width.saturating_sub(content_width) / 2;
+    let base_column = pane_width.saturating_sub(content_width) / 2;
     let mut rows = Vec::new();
 
     for (block_index, block) in document.blocks().iter().enumerate() {
-        match block {
-            Block::Paragraph(text) | Block::RawHtml(text) => {
-                wrap_block(text, block_index, content_width, column, &mut rows);
-            }
-        }
+        let leading = block_leading(block);
+        let leading_width = UnicodeWidthStr::width(leading.as_str());
+        let block_width = content_width.saturating_sub(leading_width).max(1);
+        let column = base_column + leading_width;
+        wrap_block(block, block_index, block_width, column, &leading, &mut rows);
     }
 
     RenderedDocument {
@@ -197,35 +283,93 @@ pub fn layout(document: &Document, width: u16) -> RenderedDocument {
     }
 }
 
-fn wrap_block(text: &str, block: usize, width: usize, column: usize, rows: &mut Vec<RenderedRow>) {
+fn block_leading(block: &Block) -> String {
+    let mut leading = "│ ".repeat(block.quote_depth());
+    if let BlockKind::ListItem { depth, .. } = block.kind() {
+        leading.push_str(&"  ".repeat(depth.saturating_sub(1)));
+    }
+    leading
+}
+
+fn wrap_block(
+    block: &Block,
+    block_index: usize,
+    width: usize,
+    column: usize,
+    leading: &str,
+    rows: &mut Vec<RenderedRow>,
+) {
     let mut row = Vec::new();
     let mut word = Vec::new();
     let mut separator = None;
+    let mut grapheme = 0;
 
-    for (grapheme, symbol) in text.graphemes(true).enumerate() {
-        let display_symbol =
-            if UnicodeWidthStr::width(symbol) == 0 && !symbol.chars().all(char::is_whitespace) {
+    for span in block.spans() {
+        let style =
+            CellStyle::from_semantics(block.kind(), span.style(), span.link_target().is_some());
+        for symbol in span.text().graphemes(true) {
+            let position = SemanticPosition {
+                block: block_index,
+                grapheme,
+            };
+            grapheme += 1;
+
+            if symbol == "\n" {
+                flush_word(
+                    &mut word,
+                    &mut separator,
+                    &mut row,
+                    width,
+                    column,
+                    leading,
+                    rows,
+                );
+                push_row_if_populated(&mut row, column, leading, rows);
+                separator = None;
+                continue;
+            }
+
+            let display_symbol = if UnicodeWidthStr::width(symbol) == 0
+                && !symbol.chars().all(char::is_whitespace)
+            {
                 format!("◌{symbol}")
             } else {
                 symbol.to_owned()
             };
-        let cell = RenderedCell {
-            width: UnicodeWidthStr::width(display_symbol.as_str()),
-            symbol: display_symbol,
-            position: SemanticPosition { block, grapheme },
-        };
-        if symbol.chars().all(char::is_whitespace) {
-            flush_word(&mut word, &mut separator, &mut row, width, column, rows);
-            separator.get_or_insert(cell);
-        } else {
-            word.push(cell);
+            let cell = RenderedCell {
+                width: UnicodeWidthStr::width(display_symbol.as_str()),
+                symbol: display_symbol,
+                position,
+                style,
+                link_target: span.link_target().map(str::to_owned),
+            };
+            if symbol.chars().all(char::is_whitespace) {
+                flush_word(
+                    &mut word,
+                    &mut separator,
+                    &mut row,
+                    width,
+                    column,
+                    leading,
+                    rows,
+                );
+                separator.get_or_insert(cell);
+            } else {
+                word.push(cell);
+            }
         }
     }
 
-    flush_word(&mut word, &mut separator, &mut row, width, column, rows);
-    if !row.is_empty() {
-        rows.push(RenderedRow { cells: row, column });
-    }
+    flush_word(
+        &mut word,
+        &mut separator,
+        &mut row,
+        width,
+        column,
+        leading,
+        rows,
+    );
+    push_row_if_populated(&mut row, column, leading, rows);
 }
 
 fn flush_word(
@@ -234,6 +378,7 @@ fn flush_word(
     row: &mut Vec<RenderedCell>,
     width: usize,
     column: usize,
+    leading: &str,
     rows: &mut Vec<RenderedRow>,
 ) {
     if word.is_empty() {
@@ -243,10 +388,7 @@ fn flush_word(
     let word_width = cells_width(word);
     let separator_width = usize::from(!row.is_empty());
     if !row.is_empty() && cells_width(row) + separator_width + word_width > width {
-        rows.push(RenderedRow {
-            cells: std::mem::take(row),
-            column,
-        });
+        push_row_if_populated(row, column, leading, rows);
     }
 
     if word_width <= width {
@@ -258,24 +400,31 @@ fn flush_word(
         }
         row.append(word);
     } else {
-        if !row.is_empty() {
-            rows.push(RenderedRow {
-                cells: std::mem::take(row),
-                column,
-            });
-        }
+        push_row_if_populated(row, column, leading, rows);
         for cell in word.drain(..) {
             if !row.is_empty() && cells_width(row) + cell.width > width {
-                rows.push(RenderedRow {
-                    cells: std::mem::take(row),
-                    column,
-                });
+                push_row_if_populated(row, column, leading, rows);
             }
             row.push(cell);
         }
     }
 
     *separator = None;
+}
+
+fn push_row_if_populated(
+    row: &mut Vec<RenderedCell>,
+    column: usize,
+    leading: &str,
+    rows: &mut Vec<RenderedRow>,
+) {
+    if !row.is_empty() {
+        rows.push(RenderedRow {
+            cells: std::mem::take(row),
+            column,
+            leading: leading.to_owned(),
+        });
+    }
 }
 
 fn cells_width(cells: &[RenderedCell]) -> usize {
