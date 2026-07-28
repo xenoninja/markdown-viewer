@@ -1,15 +1,18 @@
 #![cfg(unix)]
 
+mod support;
+
 use std::fs::{self, File};
-use std::io::{ErrorKind, Read, Write};
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::pty::{Winsize, openpty};
-use nix::sys::termios::tcgetattr;
+use nix::sys::termios::{LocalFlags, tcgetattr};
 use nix::unistd::dup;
+use support::{contains, read_available};
 use tempfile::tempdir;
 
 #[test]
@@ -44,14 +47,7 @@ fn reading_session_enters_and_restores_the_terminal() {
     let mut output = Vec::new();
     let mut sent_quit = false;
     let status = loop {
-        let mut chunk = [0_u8; 4096];
-        match master.read(&mut chunk) {
-            Ok(0) => {}
-            Ok(read) => output.extend_from_slice(&chunk[..read]),
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-            Err(error) if error.raw_os_error() == Some(5) => {}
-            Err(error) => panic!("read PTY output: {error}"),
-        }
+        read_available(&mut master, &mut output);
 
         if !sent_quit && contains(&output, b"\x1b[?1049h") {
             master.write_all(b"q").expect("send quit");
@@ -59,7 +55,7 @@ fn reading_session_enters_and_restores_the_terminal() {
         }
 
         if let Some(status) = child.try_wait().expect("poll mdview") {
-            drain(&mut master, &mut output);
+            read_available(&mut master, &mut output);
             break status;
         }
 
@@ -81,24 +77,25 @@ fn reading_session_enters_and_restores_the_terminal() {
         contains(&output, b"PTY") && contains(&output, b"paragraph"),
         "Document rendered; PTY output: {output:?}"
     );
-    assert_eq!(terminal_after, terminal_before, "raw mode restored");
-}
-
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
-}
-
-fn drain(master: &mut File, output: &mut Vec<u8>) {
-    loop {
-        let mut chunk = [0_u8; 4096];
-        match master.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(read) => output.extend_from_slice(&chunk[..read]),
-            Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-            Err(error) if error.raw_os_error() == Some(5) => break,
-            Err(error) => panic!("drain PTY output: {error}"),
-        }
-    }
+    assert_eq!(
+        terminal_after.input_flags, terminal_before.input_flags,
+        "input mode restored"
+    );
+    assert_eq!(
+        terminal_after.output_flags, terminal_before.output_flags,
+        "output mode restored"
+    );
+    assert_eq!(
+        terminal_after.control_flags, terminal_before.control_flags,
+        "control mode restored"
+    );
+    assert_eq!(
+        terminal_after.local_flags - LocalFlags::PENDIN,
+        terminal_before.local_flags - LocalFlags::PENDIN,
+        "local mode restored"
+    );
+    assert_eq!(
+        terminal_after.control_chars, terminal_before.control_chars,
+        "control characters restored"
+    );
 }

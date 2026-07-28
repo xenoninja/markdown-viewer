@@ -1,5 +1,6 @@
 use std::env;
 use std::ffi::OsString;
+use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -13,18 +14,34 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let path = one_path(env::args_os())?;
-    let document = mdview::load_document(path)?;
+    let input = one_input(env::args_os(), io::stdin().is_terminal())?;
+    let document = match input {
+        Input::Path(path) => mdview::load_document(path)?,
+        Input::StandardInput => mdview::load_standard_input()?,
+    };
     mdview::run_reading_session(document)?;
     Ok(())
 }
 
-fn one_path(arguments: impl IntoIterator<Item = OsString>) -> Result<OsString, &'static str> {
+enum Input {
+    Path(OsString),
+    StandardInput,
+}
+
+fn one_input(
+    arguments: impl IntoIterator<Item = OsString>,
+    standard_input_is_terminal: bool,
+) -> Result<Input, &'static str> {
     let mut arguments = arguments.into_iter();
     let _executable = arguments.next();
-    let path = arguments.next().ok_or("usage: mdview <document-path>")?;
+    let input = match arguments.next() {
+        Some(input) if input == "-" => Input::StandardInput,
+        Some(path) => Input::Path(path),
+        None if !standard_input_is_terminal => Input::StandardInput,
+        None => return Err("usage: mdview [<document-path> | -]"),
+    };
     if arguments.next().is_some() {
-        return Err("expected exactly one document path");
+        return Err("expected at most one Document input");
     }
-    Ok(path)
+    Ok(input)
 }

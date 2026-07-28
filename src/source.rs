@@ -1,6 +1,6 @@
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::Document;
@@ -61,7 +61,19 @@ pub fn load_document(path: impl AsRef<Path>) -> Result<Document, SourceError> {
         path: path.to_owned(),
         kind: SourceErrorKind::Read(error),
     })?;
-    let markdown = String::from_utf8_lossy(&bytes);
 
-    Ok(Document::parse(&markdown))
+    Ok(parse_bytes(&bytes))
+}
+
+pub fn load_standard_input() -> io::Result<Document> {
+    let mut bytes = Vec::new();
+    io::stdin().read_to_end(&mut bytes).map_err(|error| {
+        io::Error::new(error.kind(), format!("cannot read standard input: {error}"))
+    })?;
+
+    Ok(parse_bytes(&bytes))
+}
+
+fn parse_bytes(bytes: &[u8]) -> Document {
+    Document::parse(&String::from_utf8_lossy(bytes))
 }
