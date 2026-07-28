@@ -1,14 +1,32 @@
 use std::fmt::Write as _;
 
 use pulldown_cmark::{
-    Alignment as ParsedAlignment, CodeBlockKind, Event, HeadingLevel as ParsedHeadingLevel,
-    Options, Parser, Tag, TagEnd,
+    Alignment as ParsedAlignment, BlockQuoteKind as ParsedBlockQuoteKind, CodeBlockKind, Event,
+    HeadingLevel as ParsedHeadingLevel, Options, Parser, Tag, TagEnd,
 };
+
+const OBJECT_REPLACEMENT_CHARACTER: &str = "\u{fffc}";
 
 /// An owned, width-independent representation of a Markdown Document.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Document {
     blocks: Vec<Block>,
+    warnings: Vec<DocumentWarning>,
+}
+
+/// A non-fatal condition encountered while loading a Document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentWarning {
+    InvalidUtf8Replaced,
+}
+
+impl DocumentWarning {
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::InvalidUtf8Replaced => "warning: invalid UTF-8 replaced with �",
+        }
+    }
 }
 
 /// The semantic role of a block in a Rendered Document.
@@ -17,10 +35,21 @@ pub enum BlockKind {
     Paragraph,
     Heading(HeadingLevel),
     Code,
+    FrontMatter,
     ThematicBreak,
     RawHtml,
     Empty,
     Table,
+}
+
+/// The declared role of a GitHub Alert.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AlertKind {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
 }
 
 /// List hierarchy attached independently to a block's semantic role.
@@ -60,6 +89,7 @@ pub struct Block {
     list_item: Option<ListItem>,
     language: Option<String>,
     table: Option<Table>,
+    alert_kind: Option<AlertKind>,
 }
 
 impl Block {
@@ -97,6 +127,11 @@ impl Block {
     #[must_use]
     pub fn table(&self) -> Option<&Table> {
         self.table.as_ref()
+    }
+
+    #[must_use]
+    pub fn alert_kind(&self) -> Option<AlertKind> {
+        self.alert_kind
     }
 }
 
@@ -202,12 +237,32 @@ impl InlineStyle {
     }
 }
 
+/// An image reference retained as inert semantic data.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Image {
+    alt_text: String,
+    target: String,
+}
+
+impl Image {
+    #[must_use]
+    pub fn alt_text(&self) -> &str {
+        &self.alt_text
+    }
+
+    #[must_use]
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+}
+
 /// A styled run of inline semantic text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InlineSpan {
     text: String,
     style: InlineStyle,
     link_target: Option<String>,
+    image: Option<Image>,
 }
 
 impl InlineSpan {
@@ -223,21 +278,34 @@ impl InlineSpan {
 
     #[must_use]
     pub fn link_target(&self) -> Option<&str> {
-        self.link_target.as_deref()
+        self.image
+            .as_ref()
+            .map(Image::target)
+            .or(self.link_target.as_deref())
+    }
+
+    #[must_use]
+    pub fn image(&self) -> Option<&Image> {
+        self.image.as_ref()
     }
 }
 
 impl Document {
     #[must_use]
     pub fn parse(markdown: &str) -> Self {
-        let options =
-            Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES;
+        let options = Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TASKLISTS
+            | Options::ENABLE_TABLES
+            | Options::ENABLE_GFM
+            | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS;
         let mut blocks = Vec::new();
         let mut builder = None;
         let mut table = None;
         let mut style = InlineStyle::default();
         let mut link_target = None;
+        let mut image = None;
         let mut quote_depth = 0;
+        let mut alerts = Vec::new();
         let mut lists = Vec::new();
         let mut items = Vec::new();
 
@@ -254,6 +322,7 @@ impl Document {
                         alignments.into_iter().map(table_alignment).collect(),
                         quote_depth,
                         list_item,
+                        current_alert(&alerts),
                     ));
                 }
                 Event::Start(Tag::TableHead) => {
@@ -298,6 +367,10 @@ impl Document {
                         block_builder_for_item(&mut items, quote_depth, BlockKind::RawHtml)
                     });
                 }
+                Event::Start(Tag::MetadataBlock(_)) => {
+                    finish_builder(&mut builder, &mut blocks);
+                    builder = Some(BlockBuilder::new(BlockKind::FrontMatter, quote_depth));
+                }
                 Event::Start(Tag::CodeBlock(kind)) => {
                     finish_builder(&mut builder, &mut blocks);
                     let language = match kind {
@@ -316,14 +389,16 @@ impl Document {
                     code.language = language;
                     builder = Some(code);
                 }
-                Event::Start(Tag::BlockQuote(_)) => quote_depth += 1,
+                Event::Start(Tag::BlockQuote(kind)) => {
+                    quote_depth += 1;
+                    alerts.push(kind.map(alert_kind));
+                }
                 Event::Start(Tag::List(start)) => {
                     finish_builder(&mut builder, &mut blocks);
                     if items.last().is_some_and(|item| !item.started) {
-                        blocks.push(
-                            block_builder_for_item(&mut items, quote_depth, BlockKind::Empty)
-                                .finish(),
-                        );
+                        let empty =
+                            block_builder_for_item(&mut items, quote_depth, BlockKind::Empty);
+                        blocks.push(finish_with_alert(empty, &alerts));
                     }
                     lists.push(ListContext { next_number: start });
                 }
@@ -349,7 +424,17 @@ impl Document {
                 Event::Start(Tag::Link { dest_url, .. }) => {
                     link_target = Some(make_inert(&dest_url));
                 }
+                Event::Start(Tag::Image { dest_url, .. }) => {
+                    image = Some(ImageBuilder {
+                        alt: String::new(),
+                        target: make_inert(&dest_url),
+                    });
+                }
                 Event::Text(text) | Event::InlineHtml(text) | Event::Html(text) => {
+                    if let Some(image) = &mut image {
+                        image.alt.push_str(&make_inert(&text));
+                        continue;
+                    }
                     if let Some(table) = &mut table {
                         table.push(&make_inert(&text), style, link_target.as_deref());
                         continue;
@@ -358,15 +443,19 @@ impl Document {
                         builder = Some(block_builder_for_leaf(&mut items, quote_depth));
                     }
                     if let Some(builder) = &mut builder {
-                        let text = if builder.kind == BlockKind::Code {
-                            make_code_inert(&text)
-                        } else {
-                            make_inert(&text)
+                        let text = match builder.kind {
+                            BlockKind::Code | BlockKind::FrontMatter => make_code_inert(&text),
+                            BlockKind::RawHtml => make_literal_inert(&text),
+                            _ => make_inert(&text),
                         };
                         builder.push(&text, style, link_target.as_deref());
                     }
                 }
                 Event::Code(text) => {
+                    if let Some(image) = &mut image {
+                        image.alt.push_str(&make_inert(&text));
+                        continue;
+                    }
                     if let Some(table) = &mut table {
                         let mut code_style = style;
                         code_style.inline_code = true;
@@ -383,14 +472,18 @@ impl Document {
                     }
                 }
                 Event::SoftBreak => {
-                    if let Some(table) = &mut table {
+                    if let Some(image) = &mut image {
+                        image.alt.push(' ');
+                    } else if let Some(table) = &mut table {
                         table.push(" ", style, link_target.as_deref());
                     } else if let Some(builder) = &mut builder {
                         builder.push(" ", style, link_target.as_deref());
                     }
                 }
                 Event::HardBreak => {
-                    if let Some(table) = &mut table {
+                    if let Some(image) = &mut image {
+                        image.alt.push(' ');
+                    } else if let Some(table) = &mut table {
                         table.push("\n", style, link_target.as_deref());
                     } else if let Some(builder) = &mut builder {
                         builder.push("\n", style, link_target.as_deref());
@@ -413,18 +506,24 @@ impl Document {
                     blocks.push(completed.finish());
                 }
                 Event::End(
-                    TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::HtmlBlock | TagEnd::CodeBlock,
+                    TagEnd::Paragraph
+                    | TagEnd::Heading(_)
+                    | TagEnd::HtmlBlock
+                    | TagEnd::CodeBlock
+                    | TagEnd::MetadataBlock(_),
                 ) => {
                     finish_builder(&mut builder, &mut blocks);
                 }
-                Event::End(TagEnd::BlockQuote(_)) => quote_depth = quote_depth.saturating_sub(1),
+                Event::End(TagEnd::BlockQuote(_)) => {
+                    quote_depth = quote_depth.saturating_sub(1);
+                    alerts.pop();
+                }
                 Event::End(TagEnd::Item) => {
                     finish_builder(&mut builder, &mut blocks);
                     if items.last().is_some_and(|item| !item.started) {
-                        blocks.push(
-                            block_builder_for_item(&mut items, quote_depth, BlockKind::Empty)
-                                .finish(),
-                        );
+                        let empty =
+                            block_builder_for_item(&mut items, quote_depth, BlockKind::Empty);
+                        blocks.push(finish_with_alert(empty, &alerts));
                     }
                     items.pop();
                 }
@@ -436,6 +535,19 @@ impl Document {
                 Event::End(TagEnd::Strong) => style.strong = false,
                 Event::End(TagEnd::Strikethrough) => style.strikethrough = false,
                 Event::End(TagEnd::Link) => link_target = None,
+                Event::End(TagEnd::Image) => {
+                    let image = image.take().expect("image end follows image start");
+                    if let Some(table) = &mut table {
+                        table.push_image(image, style);
+                    } else {
+                        if builder.is_none() && !items.is_empty() {
+                            builder = Some(block_builder_for_leaf(&mut items, quote_depth));
+                        }
+                        if let Some(builder) = &mut builder {
+                            builder.push_image(image, style);
+                        }
+                    }
+                }
                 Event::TaskListMarker(checked) => {
                     if let Some(item) = items.last_mut() {
                         item.marker = item.marker.with_task_state(checked);
@@ -448,19 +560,37 @@ impl Document {
                     } else {
                         block_builder_for_item(&mut items, quote_depth, BlockKind::ThematicBreak)
                     };
-                    blocks.push(rule.finish());
+                    blocks.push(finish_with_alert(rule, &alerts));
                 }
                 _ => {}
+            }
+
+            if let Some(builder) = &mut builder
+                && builder.alert_kind.is_none()
+            {
+                builder.alert_kind = current_alert(&alerts);
             }
         }
 
         finish_builder(&mut builder, &mut blocks);
-        Self { blocks }
+        Self {
+            blocks,
+            warnings: Vec::new(),
+        }
     }
 
     #[must_use]
     pub fn blocks(&self) -> &[Block] {
         &self.blocks
+    }
+
+    #[must_use]
+    pub fn warnings(&self) -> &[DocumentWarning] {
+        &self.warnings
+    }
+
+    pub(crate) fn add_warning(&mut self, warning: DocumentWarning) {
+        self.warnings.push(warning);
     }
 }
 
@@ -471,6 +601,13 @@ struct BlockBuilder {
     quote_depth: usize,
     list_item: Option<ListItem>,
     language: Option<String>,
+    alert_kind: Option<AlertKind>,
+}
+
+#[derive(Debug)]
+struct ImageBuilder {
+    alt: String,
+    target: String,
 }
 
 impl BlockBuilder {
@@ -481,6 +618,7 @@ impl BlockBuilder {
             quote_depth,
             list_item: None,
             language: None,
+            alert_kind: None,
         }
     }
 
@@ -490,6 +628,7 @@ impl BlockBuilder {
         }
 
         if let Some(last) = self.spans.last_mut()
+            && last.image.is_none()
             && last.style == style
             && last.link_target.as_deref() == link_target
         {
@@ -501,6 +640,19 @@ impl BlockBuilder {
             text: text.to_owned(),
             style,
             link_target: link_target.map(str::to_owned),
+            image: None,
+        });
+    }
+
+    fn push_image(&mut self, image: ImageBuilder, style: InlineStyle) {
+        self.spans.push(InlineSpan {
+            text: OBJECT_REPLACEMENT_CHARACTER.to_owned(),
+            style,
+            link_target: None,
+            image: Some(Image {
+                alt_text: image.alt,
+                target: image.target,
+            }),
         });
     }
 
@@ -514,6 +666,7 @@ impl BlockBuilder {
             list_item: self.list_item,
             language: self.language,
             table: None,
+            alert_kind: self.alert_kind,
         }
     }
 }
@@ -526,6 +679,7 @@ struct TableBuilder {
     cell: Option<BlockBuilder>,
     quote_depth: usize,
     list_item: Option<ListItem>,
+    alert_kind: Option<AlertKind>,
 }
 
 impl TableBuilder {
@@ -533,6 +687,7 @@ impl TableBuilder {
         alignments: Vec<TableAlignment>,
         quote_depth: usize,
         list_item: Option<ListItem>,
+        alert_kind: Option<AlertKind>,
     ) -> Self {
         Self {
             alignments,
@@ -541,6 +696,7 @@ impl TableBuilder {
             cell: None,
             quote_depth,
             list_item,
+            alert_kind,
         }
     }
 
@@ -568,6 +724,16 @@ impl TableBuilder {
             .as_mut()
             .expect("table content has a cell")
             .push(text, style, link_target);
+    }
+
+    fn push_image(&mut self, image: ImageBuilder, style: InlineStyle) {
+        if self.cell.is_none() {
+            self.start_cell();
+        }
+        self.cell
+            .as_mut()
+            .expect("table content has a cell")
+            .push_image(image, style);
     }
 
     fn finish_cell(&mut self) {
@@ -637,6 +803,7 @@ impl TableBuilder {
                 alignments: self.alignments,
                 rows,
             }),
+            alert_kind: self.alert_kind,
         }
     }
 }
@@ -701,6 +868,11 @@ fn finish_builder(builder: &mut Option<BlockBuilder>, blocks: &mut Vec<Block>) {
     }
 }
 
+fn finish_with_alert(mut builder: BlockBuilder, alerts: &[Option<AlertKind>]) -> Block {
+    builder.alert_kind = current_alert(alerts);
+    builder.finish()
+}
+
 fn heading_level(level: ParsedHeadingLevel) -> HeadingLevel {
     match level {
         ParsedHeadingLevel::H1 => HeadingLevel::H1,
@@ -719,6 +891,20 @@ fn table_alignment(alignment: ParsedAlignment) -> TableAlignment {
         ParsedAlignment::Center => TableAlignment::Center,
         ParsedAlignment::Right => TableAlignment::Right,
     }
+}
+
+fn alert_kind(kind: ParsedBlockQuoteKind) -> AlertKind {
+    match kind {
+        ParsedBlockQuoteKind::Note => AlertKind::Note,
+        ParsedBlockQuoteKind::Tip => AlertKind::Tip,
+        ParsedBlockQuoteKind::Important => AlertKind::Important,
+        ParsedBlockQuoteKind::Warning => AlertKind::Warning,
+        ParsedBlockQuoteKind::Caution => AlertKind::Caution,
+    }
+}
+
+fn current_alert(alerts: &[Option<AlertKind>]) -> Option<AlertKind> {
+    alerts.iter().rev().copied().flatten().next()
 }
 
 fn make_inert(text: &str) -> String {
@@ -752,6 +938,29 @@ fn make_code_inert(text: &str) -> String {
         match character {
             '\n' | '\t' => inert.push(character),
             '\r' => inert.push(' '),
+            '\u{00}'..='\u{1f}' => inert.push(
+                char::from_u32(u32::from(character) + 0x2400).expect("control picture exists"),
+            ),
+            '\u{7f}' => inert.push('␡'),
+            _ if character.is_control() => {
+                write!(inert, "\\u{{{:04X}}}", u32::from(character))
+                    .expect("writing to a String cannot fail");
+            }
+            _ => inert.push(character),
+        }
+    }
+
+    inert
+}
+
+fn make_literal_inert(text: &str) -> String {
+    let mut inert = String::with_capacity(text.len());
+
+    for character in text.chars() {
+        match character {
+            '\n' => inert.push(character),
+            '\r' => inert.push(' '),
+            '\t' => inert.push('⇥'),
             '\u{00}'..='\u{1f}' => inert.push(
                 char::from_u32(u32::from(character) + 0x2400).expect("control picture exists"),
             ),

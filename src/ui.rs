@@ -1,4 +1,5 @@
 use ratatui::Frame;
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
@@ -11,11 +12,17 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
     let rendered = session.rendered(frame.area().width);
     let cursor = session.cursor();
     let color_enabled = std::env::var_os("NO_COLOR").is_none();
+    let content_area = Rect::new(
+        frame.area().x,
+        frame.area().y,
+        frame.area().width,
+        session.content_height(frame.area().height),
+    );
     let lines = rendered
         .rows()
         .iter()
         .skip(session.viewport())
-        .take(usize::from(frame.area().height))
+        .take(usize::from(content_area.height))
         .map(|row| {
             let mut spans = Vec::with_capacity(row.cells().len() + 1);
             let blank_width = row.column().saturating_sub(row.leading_width());
@@ -42,7 +49,19 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
         })
         .collect::<Vec<_>>();
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), frame.area());
+    frame.render_widget(Paragraph::new(Text::from(lines)), content_area);
+    if let Some(warning) = session.status_warning() {
+        let status_area = Rect::new(
+            frame.area().x,
+            frame.area().bottom().saturating_sub(1),
+            frame.area().width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(warning).style(Style::new().add_modifier(Modifier::BOLD)),
+            status_area,
+        );
+    }
 }
 
 fn cell_style(semantic: layout::CellStyle, color_enabled: bool) -> Style {

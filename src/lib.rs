@@ -8,8 +8,8 @@ mod ui;
 
 pub use app::{Command, Harness, ReadingSession};
 pub use document::{
-    Block, BlockKind, Document, HeadingLevel, InlineSpan, InlineStyle, ListItem, ListMarker, Table,
-    TableAlignment, TableCell, TableRow,
+    AlertKind, Block, BlockKind, Document, DocumentWarning, HeadingLevel, Image, InlineSpan,
+    InlineStyle, ListItem, ListMarker, Table, TableAlignment, TableCell, TableRow,
 };
 pub use highlight::{CodeHighlighter, HighlightStyle};
 pub use layout::{

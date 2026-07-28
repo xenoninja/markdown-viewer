@@ -63,6 +63,21 @@ fn displays_raw_html_literally() {
 }
 
 #[test]
+fn invalid_utf8_is_visible_and_reported_without_blocking_reading() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("invalid-utf8");
+    fs::write(&path, b"before \xff after").expect("write fixture");
+
+    let mut harness = Harness::open(&path, 48, 4).expect("open Reading Session");
+    let frame = harness.frame();
+
+    assert!(frame.contains("before � after"));
+    assert!(frame.contains("warning: invalid UTF-8 replaced with �"));
+    harness.command(Command::Quit);
+    assert!(harness.has_quit());
+}
+
+#[test]
 fn reads_common_github_markdown_as_a_rendered_document() {
     let document = mdview::Document::parse(
         "## Title\n\nPlain *emphasis*, **strong**, and ~~old~~.\n\n> Use `cargo test` and [read more](https://example.com).\n\n- item\n  - [x] done\n\n---\n",

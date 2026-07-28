@@ -5,7 +5,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::highlight::HighlightStyle;
 use crate::{
-    Block, BlockKind, Document, HeadingLevel, InlineStyle, ListMarker, TableAlignment, TableCell,
+    AlertKind, Block, BlockKind, Document, HeadingLevel, Image, InlineStyle, ListMarker,
+    TableAlignment, TableCell,
 };
 
 const MAX_PROSE_WIDTH: usize = 100;
@@ -396,7 +397,7 @@ pub(crate) fn layout_with_state(
     for (block_index, block) in document.blocks().iter().enumerate() {
         let leading = block_leading(block);
         let leading_width = UnicodeWidthStr::width(leading.as_str());
-        if block.kind() == BlockKind::Code {
+        if matches!(block.kind(), BlockKind::Code | BlockKind::FrontMatter) {
             layout_code(
                 block,
                 block_index,
@@ -551,8 +552,12 @@ fn layout_table(
     ];
     for row in table.rows() {
         for (column, cell) in row.cells().iter().enumerate() {
-            let content_width = cell
-                .text()
+            let display_text = cell
+                .spans()
+                .iter()
+                .map(inline_display_text)
+                .collect::<String>();
+            let content_width = display_text
                 .split('\n')
                 .map(UnicodeWidthStr::width)
                 .max()
@@ -564,9 +569,15 @@ fn layout_table(
             let grapheme_width = cell
                 .spans()
                 .iter()
-                .flat_map(|span| span.text().graphemes(true))
-                .filter(|symbol| *symbol != "\n")
-                .map(display_width)
+                .map(|span| {
+                    let display_text = inline_display_text(span);
+                    display_text
+                        .graphemes(true)
+                        .filter(|symbol| *symbol != "\n")
+                        .map(display_width)
+                        .max()
+                        .unwrap_or_default()
+                })
                 .max()
                 .unwrap_or(1);
             column_widths[column].minimum = column_widths[column]
@@ -717,6 +728,19 @@ fn layout_table_cell(
         let style =
             CellStyle::from_semantics(BlockKind::Table, span.style(), span.link_target().is_some())
                 .with_table_header(table_header);
+        if let Some(image) = span.image() {
+            let image_cell = rendered_image_cell(block_index, grapheme, style, image);
+            let line = lines.last_mut().expect("table cell has a visual line");
+            if !line.is_empty() && cells_width(line).saturating_add(image_cell.width) > width {
+                lines.push(Vec::new());
+            }
+            lines
+                .last_mut()
+                .expect("table cell has a visual line")
+                .push(image_cell);
+            grapheme += 1;
+            continue;
+        }
         for symbol in span.text().graphemes(true) {
             let position = SemanticPosition {
                 block: block_index,
@@ -799,7 +823,10 @@ fn push_table_decoration(cells: &mut Vec<RenderedCell>, block: usize, symbol: &s
 }
 
 fn block_leading(block: &Block) -> String {
-    let mut leading = "│ ".repeat(block.quote_depth());
+    let mut leading = quote_leading(block);
+    if block.kind() == BlockKind::FrontMatter {
+        leading.push_str("metadata │ ");
+    }
     if let Some(crate::ListItem {
         depth,
         marker,
@@ -815,6 +842,27 @@ fn block_leading(block: &Block) -> String {
         }
     }
     leading
+}
+
+fn quote_leading(block: &Block) -> String {
+    if let Some(alert) = block.alert_kind() {
+        let mut leading = "│ ".repeat(block.quote_depth().saturating_sub(1));
+        leading.push_str(alert_label(alert));
+        leading.push_str(" │ ");
+        leading
+    } else {
+        "│ ".repeat(block.quote_depth())
+    }
+}
+
+fn alert_label(kind: AlertKind) -> &'static str {
+    match kind {
+        AlertKind::Note => "NOTE",
+        AlertKind::Tip => "TIP",
+        AlertKind::Important => "IMPORTANT",
+        AlertKind::Warning => "WARNING",
+        AlertKind::Caution => "CAUTION",
+    }
 }
 
 fn list_marker(marker: ListMarker) -> String {
@@ -868,7 +916,7 @@ fn layout_empty_list_item(
     let item = block
         .list_item()
         .expect("empty list content belongs to a list item");
-    let mut leading = "│ ".repeat(block.quote_depth());
+    let mut leading = quote_leading(block);
     leading.push_str(&"  ".repeat(item.depth.saturating_sub(1)));
     let symbol = list_marker(item.marker).trim_end().to_owned();
     let column = base_column + UnicodeWidthStr::width(leading.as_str());
@@ -907,6 +955,11 @@ fn wrap_block(
     for span in block.spans() {
         let style =
             CellStyle::from_semantics(block.kind(), span.style(), span.link_target().is_some());
+        if let Some(image) = span.image() {
+            word.push(rendered_image_cell(block_index, grapheme, style, image));
+            grapheme += 1;
+            continue;
+        }
         for symbol in span.text().graphemes(true) {
             let position = SemanticPosition {
                 block: block_index,
@@ -965,6 +1018,37 @@ fn wrap_block(
         rows,
     );
     push_row_if_populated(&mut row, column, leading, rows);
+}
+
+fn inline_display_text(span: &crate::InlineSpan) -> String {
+    span.image()
+        .map_or_else(|| span.text().to_owned(), image_placeholder)
+}
+
+fn image_placeholder(image: &Image) -> String {
+    let alt = if image.alt_text().is_empty() {
+        "(no alt text)"
+    } else {
+        image.alt_text()
+    };
+    format!("[image: {alt} → {}]", image.target())
+}
+
+fn rendered_image_cell(
+    block: usize,
+    grapheme: usize,
+    style: CellStyle,
+    image: &Image,
+) -> RenderedCell {
+    let symbol = image_placeholder(image);
+    RenderedCell {
+        width: UnicodeWidthStr::width(symbol.as_str()),
+        symbol,
+        position: SemanticPosition { block, grapheme },
+        style,
+        link_target: Some(image.target().to_owned()),
+        decorative: false,
+    }
 }
 
 fn flush_word(

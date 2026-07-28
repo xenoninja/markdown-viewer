@@ -60,6 +60,7 @@ impl ReadingSession {
     }
 
     pub fn key(&mut self, key: KeyEvent, width: u16, height: u16) {
+        let height = self.content_height(height);
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && let KeyCode::Char(character) = key.code
         {
@@ -141,6 +142,7 @@ impl ReadingSession {
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
+        let height = self.content_height(height);
         if let Some(cursor) = self.cursor {
             self.ensure_horizontal_cursor_visible(width, cursor);
         }
@@ -158,6 +160,7 @@ impl ReadingSession {
     }
 
     pub(crate) fn prepare_highlighting(&mut self, width: u16, height: u16) {
+        let height = self.content_height(height);
         self.highlighting.collect();
         let rendered = self.rendered(width);
         let margin = usize::from(height.max(1));
@@ -186,6 +189,17 @@ impl ReadingSession {
 
     pub(crate) fn highlighting_pending(&self) -> bool {
         self.highlighting.is_pending()
+    }
+
+    pub(crate) fn status_warning(&self) -> Option<&'static str> {
+        self.document
+            .warnings()
+            .first()
+            .map(|warning| warning.message())
+    }
+
+    pub(crate) fn content_height(&self, screen_height: u16) -> u16 {
+        screen_height.saturating_sub(u16::from(self.status_warning().is_some()))
     }
 
     fn control(&mut self, character: char, width: u16, height: u16) {

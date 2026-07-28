@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use crate::Document;
+use crate::{Document, DocumentWarning};
 
 #[derive(Debug)]
 pub struct SourceError {
@@ -75,5 +75,12 @@ pub fn load_standard_input() -> io::Result<Document> {
 }
 
 fn parse_bytes(bytes: &[u8]) -> Document {
-    Document::parse(&String::from_utf8_lossy(bytes))
+    match std::str::from_utf8(bytes) {
+        Ok(markdown) => Document::parse(markdown),
+        Err(_) => {
+            let mut document = Document::parse(&String::from_utf8_lossy(bytes));
+            document.add_warning(DocumentWarning::InvalidUtf8Replaced);
+            document
+        }
+    }
 }
