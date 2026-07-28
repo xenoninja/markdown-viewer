@@ -2,20 +2,21 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::HeadingLevel;
-use crate::app::ReadingSession;
+use crate::app::{PaneFocus, ReadingSession};
 use crate::layout;
 
 pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
+    let panes = session.pane_layout(frame.area().width);
     let rendered = session.rendered(frame.area().width);
     let cursor = session.cursor();
     let color_enabled = std::env::var_os("NO_COLOR").is_none();
     let content_area = Rect::new(
-        frame.area().x,
+        panes.document_x,
         frame.area().y,
-        frame.area().width,
+        panes.document_width,
         session.content_height(frame.area().height),
     );
     let lines = rendered
@@ -50,6 +51,38 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
         .collect::<Vec<_>>();
 
     frame.render_widget(Paragraph::new(Text::from(lines)), content_area);
+    if panes.outline_width > 0 {
+        let outline_area = Rect::new(
+            frame.area().x,
+            frame.area().y,
+            panes.outline_width.saturating_add(1),
+            session.content_height(frame.area().height),
+        );
+        let current_section = session.current_section();
+        let outline_selection = session.outline_selection();
+        let outline = session
+            .outline()
+            .iter()
+            .skip(session.outline_viewport())
+            .map(|entry| {
+                let indent = "  ".repeat(heading_depth(entry.level).saturating_sub(1));
+                let mut style = Style::new();
+                if Some(entry.position) == current_section {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                if session.focus() == PaneFocus::Outline
+                    && Some(entry.position) == outline_selection
+                {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+                Line::styled(format!("{indent}{}", entry.label), style)
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(outline).block(Block::new().borders(Borders::RIGHT)),
+            outline_area,
+        );
+    }
     if let Some(warning) = session.status_warning() {
         let status_area = Rect::new(
             frame.area().x,
@@ -61,6 +94,17 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
             Paragraph::new(warning).style(Style::new().add_modifier(Modifier::BOLD)),
             status_area,
         );
+    }
+}
+
+fn heading_depth(level: HeadingLevel) -> usize {
+    match level {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
     }
 }
 

@@ -6,7 +6,7 @@ mod source;
 mod terminal;
 mod ui;
 
-pub use app::{Command, Harness, ReadingSession};
+pub use app::{Command, Harness, PaneFocus, ReadingSession};
 pub use document::{
     AlertKind, Block, BlockKind, Document, DocumentWarning, HeadingLevel, Image, InlineSpan,
     InlineStyle, ListItem, ListMarker, Table, TableAlignment, TableCell, TableRow,

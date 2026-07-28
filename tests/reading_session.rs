@@ -86,7 +86,8 @@ fn reads_common_github_markdown_as_a_rendered_document() {
     let frame = harness.frame();
 
     assert!(frame.contains("Title"));
-    assert!(frame.contains("Plain emphasis, strong, and old."));
+    assert!(frame.contains("Plain emphasis, strong, and"));
+    assert!(frame.contains("old."));
     assert!(frame.contains("│ Use cargo test and read more."));
     assert!(frame.contains("• item"));
     assert!(frame.contains("  ☑ done"));

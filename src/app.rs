@@ -7,26 +7,85 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::Document;
 use crate::highlight::{CodeHighlighter, HighlightCache};
 use crate::layout::{CellLocation, RenderedDocument, SemanticPosition, layout, layout_with_state};
 use crate::source::{SourceError, load_document};
 use crate::ui;
+use crate::{BlockKind, Document, HeadingLevel};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
     Quit,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaneFocus {
+    Document,
+    Outline,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OutlineEntry {
+    pub(crate) position: SemanticPosition,
+    pub(crate) level: HeadingLevel,
+    pub(crate) label: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PaneLayout {
+    pub(crate) outline_width: u16,
+    pub(crate) document_x: u16,
+    pub(crate) document_width: u16,
+}
+
+#[derive(Debug, Default)]
+struct JumpHistory {
+    back: Vec<SemanticPosition>,
+    forward: Vec<SemanticPosition>,
+}
+
+impl JumpHistory {
+    fn record(&mut self, prior_location: SemanticPosition) {
+        self.back.push(prior_location);
+        self.forward.clear();
+    }
+
+    fn traverse(
+        &mut self,
+        current_location: SemanticPosition,
+        direction: JumpDirection,
+    ) -> Option<SemanticPosition> {
+        let (source, destination) = match direction {
+            JumpDirection::Backward => (&mut self.back, &mut self.forward),
+            JumpDirection::Forward => (&mut self.forward, &mut self.back),
+        };
+        let target = source.pop()?;
+        destination.push(current_location);
+        Some(target)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum JumpDirection {
+    Backward,
+    Forward,
+}
+
 #[derive(Debug)]
 pub struct ReadingSession {
     document: Document,
     cursor: Option<SemanticPosition>,
+    outline: Vec<OutlineEntry>,
+    outline_selection: Option<usize>,
+    outline_viewport: usize,
+    focus: PaneFocus,
+    jump_history: JumpHistory,
     viewport: usize,
     horizontal_offsets: Vec<usize>,
     preferred_column: Option<usize>,
     pending_count: Option<usize>,
     pending_g: bool,
+    pending_control_w: bool,
     quit: bool,
     highlighting: HighlightCache,
 }
@@ -39,15 +98,37 @@ impl ReadingSession {
 
     fn with_highlight_cache(document: Document, highlighting: HighlightCache) -> Self {
         let cursor = layout(&document, 100).first_position();
+        let outline = document
+            .blocks()
+            .iter()
+            .enumerate()
+            .filter_map(|(block, content)| {
+                let BlockKind::Heading(level) = content.kind() else {
+                    return None;
+                };
+                Some(OutlineEntry {
+                    position: SemanticPosition { block, grapheme: 0 },
+                    level,
+                    label: outline_label(content),
+                })
+            })
+            .collect::<Vec<_>>();
+        let outline_selection = (!outline.is_empty()).then_some(0);
         let block_count = document.blocks().len();
         Self {
             document,
             cursor,
+            outline,
+            outline_selection,
+            outline_viewport: 0,
+            focus: PaneFocus::Document,
+            jump_history: JumpHistory::default(),
             viewport: 0,
             horizontal_offsets: vec![0; block_count],
             preferred_column: None,
             pending_count: None,
             pending_g: false,
+            pending_control_w: false,
             quit: false,
             highlighting,
         }
@@ -61,9 +142,52 @@ impl ReadingSession {
 
     pub fn key(&mut self, key: KeyEvent, width: u16, height: u16) {
         let height = self.content_height(height);
+        if key.code == KeyCode::Esc {
+            self.focus = PaneFocus::Document;
+            self.ensure_outline_context_visible(height);
+            self.clear_pending();
+            return;
+        }
+
+        if key.code == KeyCode::Tab {
+            if self.focus == PaneFocus::Document {
+                self.traverse_jump_history(JumpDirection::Forward, width, height);
+            }
+            self.clear_pending();
+            return;
+        }
+
+        if key.code == KeyCode::Enter {
+            if self.focus == PaneFocus::Outline {
+                self.activate_outline_selection(width, height);
+            }
+            self.clear_pending();
+            return;
+        }
+
+        if self.pending_control_w {
+            self.pending_control_w = false;
+            match key.code {
+                KeyCode::Char('h') if !self.outline.is_empty() => {
+                    self.focus = PaneFocus::Outline;
+                }
+                KeyCode::Char('l') => self.focus = PaneFocus::Document,
+                _ => {}
+            }
+            self.ensure_outline_context_visible(height);
+            self.clear_pending();
+            return;
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && let KeyCode::Char(character) = key.code
         {
+            if character == 'w' {
+                self.pending_control_w = true;
+                self.pending_count = None;
+                self.pending_g = false;
+                return;
+            }
             self.control(character, width, height);
             return;
         }
@@ -74,9 +198,10 @@ impl ReadingSession {
         };
 
         if character.is_ascii_digit() {
-            if character == '0' && self.pending_count.is_none() {
+            if self.focus == PaneFocus::Document && character == '0' && self.pending_count.is_none()
+            {
                 self.motion(width, height, Motion::RowStart, 1);
-            } else {
+            } else if character != '0' || self.pending_count.is_some() {
                 let digit = character.to_digit(10).expect("ASCII digit") as usize;
                 self.pending_count = Some(
                     self.pending_count
@@ -88,7 +213,7 @@ impl ReadingSession {
             return;
         }
 
-        if self.pending_g {
+        if self.focus == PaneFocus::Document && self.pending_g {
             self.pending_g = false;
             if character == 'g' {
                 let count = self.pending_count.take();
@@ -97,13 +222,23 @@ impl ReadingSession {
             }
         }
 
-        if character == 'g' {
+        if self.focus == PaneFocus::Document && character == 'g' {
             self.pending_g = true;
             return;
         }
 
         let supplied_count = self.pending_count.take();
         let count = supplied_count.unwrap_or(1).max(1);
+        if self.focus == PaneFocus::Outline {
+            match character {
+                'q' => self.command(Command::Quit),
+                'j' => self.move_outline_selection(count, true, height),
+                'k' => self.move_outline_selection(count, false, height),
+                _ => self.clear_pending(),
+            }
+            return;
+        }
+
         match character {
             'q' => self.command(Command::Quit),
             'h' => self.motion(width, height, Motion::Left, count),
@@ -137,12 +272,35 @@ impl ReadingSession {
     }
 
     #[must_use]
+    pub fn current_section(&self) -> Option<SemanticPosition> {
+        let cursor = self.cursor?;
+        self.outline
+            .iter()
+            .rev()
+            .find(|entry| entry.position.block <= cursor.block)
+            .map(|entry| entry.position)
+    }
+
+    #[must_use]
+    pub fn outline_selection(&self) -> Option<SemanticPosition> {
+        self.outline_selection
+            .and_then(|selection| self.outline.get(selection))
+            .map(|entry| entry.position)
+    }
+
+    #[must_use]
+    pub fn focus(&self) -> PaneFocus {
+        self.focus
+    }
+
+    #[must_use]
     pub fn viewport(&self) -> usize {
         self.viewport
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
         let height = self.content_height(height);
+        self.ensure_outline_context_visible(height);
         if let Some(cursor) = self.cursor {
             self.ensure_horizontal_cursor_visible(width, cursor);
         }
@@ -151,6 +309,7 @@ impl ReadingSession {
     }
 
     pub(crate) fn rendered(&self, width: u16) -> RenderedDocument {
+        let width = self.pane_layout(width).document_width;
         layout_with_state(
             &self.document,
             width,
@@ -202,7 +361,37 @@ impl ReadingSession {
         screen_height.saturating_sub(u16::from(self.status_warning().is_some()))
     }
 
+    pub(crate) fn outline(&self) -> &[OutlineEntry] {
+        &self.outline
+    }
+
+    pub(crate) fn outline_viewport(&self) -> usize {
+        self.outline_viewport
+    }
+
+    pub(crate) fn pane_layout(&self, screen_width: u16) -> PaneLayout {
+        if self.outline.is_empty() {
+            return PaneLayout {
+                outline_width: 0,
+                document_x: 0,
+                document_width: screen_width,
+            };
+        }
+
+        let outline_width = (screen_width / 3).max(1);
+        let document_x = outline_width.saturating_add(1).min(screen_width);
+        PaneLayout {
+            outline_width,
+            document_x,
+            document_width: screen_width.saturating_sub(document_x).max(1),
+        }
+    }
+
     fn control(&mut self, character: char, width: u16, height: u16) {
+        if self.focus == PaneFocus::Outline {
+            self.clear_pending();
+            return;
+        }
         let count = self.pending_count.take().unwrap_or(1).max(1);
         self.pending_g = false;
         let page = usize::from(height.max(1));
@@ -216,8 +405,40 @@ impl ReadingSession {
             'f' => self.motion(width, height, Motion::Down, page_distance),
             'e' => self.scroll(&self.rendered(width), height, scroll_distance),
             'y' => self.scroll(&self.rendered(width), height, -scroll_distance),
+            'o' => self.traverse_jump_history(JumpDirection::Backward, width, height),
+            'i' => self.traverse_jump_history(JumpDirection::Forward, width, height),
             _ => {}
         }
+    }
+
+    fn activate_outline_selection(&mut self, width: u16, height: u16) {
+        let Some(target) = self.outline_selection() else {
+            return;
+        };
+        if let Some(cursor) = self.cursor {
+            self.jump_history.record(cursor);
+        }
+        self.focus = PaneFocus::Document;
+        self.move_cursor_to(target, width, height);
+    }
+
+    fn traverse_jump_history(&mut self, direction: JumpDirection, width: u16, height: u16) {
+        let Some(cursor) = self.cursor else {
+            return;
+        };
+        let Some(target) = self.jump_history.traverse(cursor, direction) else {
+            return;
+        };
+        self.move_cursor_to(target, width, height);
+    }
+
+    fn move_cursor_to(&mut self, target: SemanticPosition, width: u16, height: u16) {
+        self.cursor = Some(target);
+        self.preferred_column = None;
+        self.ensure_horizontal_cursor_visible(width, target);
+        let rendered = self.rendered(width);
+        self.ensure_cursor_visible(&rendered, height);
+        self.ensure_outline_context_visible(height);
     }
 
     fn motion(&mut self, width: u16, height: u16, motion: Motion, count: usize) {
@@ -228,6 +449,7 @@ impl ReadingSession {
         let Some(location) = rendered.cell_for_position(cursor) else {
             self.cursor = rendered.first_position();
             self.ensure_cursor_visible(&rendered, height);
+            self.ensure_outline_context_visible(height);
             return;
         };
 
@@ -281,6 +503,7 @@ impl ReadingSession {
         }
         let rendered = self.rendered(width);
         self.ensure_cursor_visible(&rendered, height);
+        self.ensure_outline_context_visible(height);
     }
 
     fn document_row(&mut self, width: u16, height: u16, count: Option<usize>, end: bool) {
@@ -302,6 +525,7 @@ impl ReadingSession {
         }
         let rendered = self.rendered(width);
         self.ensure_cursor_visible(&rendered, height);
+        self.ensure_outline_context_visible(height);
     }
 
     fn scroll(&mut self, rendered: &RenderedDocument, height: u16, amount: isize) {
@@ -337,6 +561,7 @@ impl ReadingSession {
             return;
         }
 
+        let width = self.pane_layout(width).document_width;
         let rendered = layout(&self.document, width);
         let Some(location) = rendered.cell_for_position(cursor) else {
             return;
@@ -367,7 +592,64 @@ impl ReadingSession {
     fn clear_pending(&mut self) {
         self.pending_count = None;
         self.pending_g = false;
+        self.pending_control_w = false;
     }
+
+    fn move_outline_selection(&mut self, count: usize, forward: bool, height: u16) {
+        let Some(selection) = self.outline_selection else {
+            return;
+        };
+        self.outline_selection = Some(if forward {
+            selection
+                .saturating_add(count)
+                .min(self.outline.len().saturating_sub(1))
+        } else {
+            selection.saturating_sub(count)
+        });
+        self.ensure_outline_context_visible(height);
+    }
+
+    fn ensure_outline_context_visible(&mut self, height: u16) {
+        let target = match self.focus {
+            PaneFocus::Outline => self.outline_selection,
+            PaneFocus::Document => self.current_section().and_then(|section| {
+                self.outline
+                    .iter()
+                    .position(|entry| entry.position == section)
+            }),
+        };
+        let Some(target) = target else {
+            self.outline_viewport = 0;
+            return;
+        };
+        let height = usize::from(height.max(1));
+        let maximum = self.outline.len().saturating_sub(height);
+        self.outline_viewport = self.outline_viewport.min(maximum);
+        if target < self.outline_viewport {
+            self.outline_viewport = target;
+        } else if target >= self.outline_viewport.saturating_add(height) {
+            self.outline_viewport = target + 1 - height;
+        }
+    }
+}
+
+fn outline_label(block: &crate::Block) -> String {
+    block
+        .spans()
+        .iter()
+        .map(|span| {
+            span.image().map_or_else(
+                || span.text(),
+                |image| {
+                    if image.alt_text().is_empty() {
+                        "(image)"
+                    } else {
+                        image.alt_text()
+                    }
+                },
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -657,6 +939,21 @@ impl Harness {
     }
 
     #[must_use]
+    pub fn current_section(&self) -> Option<SemanticPosition> {
+        self.session.current_section()
+    }
+
+    #[must_use]
+    pub fn outline_selection(&self) -> Option<SemanticPosition> {
+        self.session.outline_selection()
+    }
+
+    #[must_use]
+    pub fn focus(&self) -> PaneFocus {
+        self.session.focus()
+    }
+
+    #[must_use]
     pub fn viewport(&self) -> usize {
         self.session.viewport()
     }
@@ -679,6 +976,22 @@ impl Harness {
         let column = u16::try_from(location.column).ok()?;
         let row = u16::try_from(location.row).ok()?;
         Some(self.terminal.backend().buffer()[(column, row)].modifier)
+    }
+
+    #[must_use]
+    pub fn outline_modifier_at(&self, position: SemanticPosition) -> Option<Modifier> {
+        let row = self
+            .session
+            .outline()
+            .iter()
+            .position(|entry| entry.position == position)?;
+        let row = row.checked_sub(self.session.outline_viewport())?;
+        let row = u16::try_from(row).ok()?;
+        let buffer = self.terminal.backend().buffer();
+        if row >= buffer.area.height {
+            return None;
+        }
+        Some(buffer[(0, row)].modifier)
     }
 
     #[must_use]
@@ -716,11 +1029,15 @@ impl Harness {
 
     fn screen_cell(&self, position: SemanticPosition) -> Option<CellLocation> {
         let area = self.terminal.backend().buffer().area;
+        let panes = self.session.pane_layout(area.width);
         let mut location = self
             .session
             .rendered(area.width)
             .cell_for_position(position)?;
         let screen_row = location.row.checked_sub(self.session.viewport())?;
+        location.column = location
+            .column
+            .saturating_add(usize::from(panes.document_x));
         if screen_row >= usize::from(area.height) || location.column >= usize::from(area.width) {
             return None;
         }
