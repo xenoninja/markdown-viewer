@@ -1,4 +1,4 @@
-use mdview::{BlockKind, Document, HeadingLevel, ListItemContent, ListMarker};
+use mdview::{BlockKind, Document, HeadingLevel, ListItem, ListMarker};
 
 #[test]
 fn headings_and_inline_formatting_keep_meaning_without_authoring_markers() {
@@ -48,61 +48,57 @@ fn ordered_unordered_nested_and_task_lists_keep_hierarchy_and_markers() {
 
     let expected = [
         (
-            BlockKind::ListItem {
+            ListItem {
                 depth: 1,
                 marker: ListMarker::Ordered(3),
                 continuation: false,
-                content: ListItemContent::Paragraph,
             },
             "first",
         ),
         (
-            BlockKind::ListItem {
+            ListItem {
                 depth: 1,
                 marker: ListMarker::Ordered(4),
                 continuation: false,
-                content: ListItemContent::Paragraph,
             },
             "second",
         ),
         (
-            BlockKind::ListItem {
+            ListItem {
                 depth: 2,
                 marker: ListMarker::Unordered,
                 continuation: false,
-                content: ListItemContent::Paragraph,
             },
             "nested",
         ),
         (
-            BlockKind::ListItem {
+            ListItem {
                 depth: 3,
                 marker: ListMarker::Task {
                     checked: true,
                     number: None,
                 },
                 continuation: false,
-                content: ListItemContent::Paragraph,
             },
             "complete",
         ),
         (
-            BlockKind::ListItem {
+            ListItem {
                 depth: 3,
                 marker: ListMarker::Task {
                     checked: false,
                     number: None,
                 },
                 continuation: false,
-                content: ListItemContent::Paragraph,
             },
             "pending",
         ),
     ];
 
     assert_eq!(document.blocks().len(), expected.len());
-    for (block, (kind, text)) in document.blocks().iter().zip(expected) {
-        assert_eq!(block.kind(), kind);
+    for (block, (list_item, text)) in document.blocks().iter().zip(expected) {
+        assert_eq!(block.kind(), BlockKind::Paragraph);
+        assert_eq!(block.list_item(), Some(list_item));
         assert_eq!(block.text(), text);
     }
 }
@@ -201,23 +197,23 @@ fn list_item_continuations_keep_their_parent_hierarchy() {
 
     assert_eq!(document.blocks().len(), 2);
     assert_eq!(
-        document.blocks()[0].kind(),
-        BlockKind::ListItem {
+        document.blocks()[0].list_item(),
+        Some(ListItem {
             depth: 1,
             marker: ListMarker::Unordered,
             continuation: false,
-            content: ListItemContent::Paragraph,
-        }
+        })
     );
     assert_eq!(
-        document.blocks()[1].kind(),
-        BlockKind::ListItem {
+        document.blocks()[1].list_item(),
+        Some(ListItem {
             depth: 1,
             marker: ListMarker::Unordered,
             continuation: true,
-            content: ListItemContent::Paragraph,
-        }
+        })
     );
+    assert_eq!(document.blocks()[0].kind(), BlockKind::Paragraph);
+    assert_eq!(document.blocks()[1].kind(), BlockKind::Paragraph);
     assert_eq!(document.blocks()[0].text(), "first paragraph");
     assert_eq!(document.blocks()[1].text(), "continuation paragraph");
 }
@@ -227,41 +223,44 @@ fn supported_blocks_and_empty_parents_keep_list_context() {
     let document = Document::parse("- # Nested heading\n- ***\n-\n  - child\n");
 
     assert_eq!(
-        document.blocks()[0].kind(),
-        BlockKind::ListItem {
+        document.blocks()[0].list_item(),
+        Some(ListItem {
             depth: 1,
             marker: ListMarker::Unordered,
             continuation: false,
-            content: ListItemContent::Heading(HeadingLevel::H1),
-        }
+        })
+    );
+    assert_eq!(
+        document.blocks()[0].kind(),
+        BlockKind::Heading(HeadingLevel::H1)
     );
     assert_eq!(document.blocks()[0].text(), "Nested heading");
     assert_eq!(
-        document.blocks()[1].kind(),
-        BlockKind::ListItem {
+        document.blocks()[1].list_item(),
+        Some(ListItem {
             depth: 1,
             marker: ListMarker::Unordered,
             continuation: false,
-            content: ListItemContent::ThematicBreak,
-        }
+        })
     );
+    assert_eq!(document.blocks()[1].kind(), BlockKind::ThematicBreak);
     assert_eq!(
-        document.blocks()[2].kind(),
-        BlockKind::ListItem {
+        document.blocks()[2].list_item(),
+        Some(ListItem {
             depth: 1,
             marker: ListMarker::Unordered,
             continuation: false,
-            content: ListItemContent::Empty,
-        }
+        })
     );
+    assert_eq!(document.blocks()[2].kind(), BlockKind::Empty);
     assert_eq!(
-        document.blocks()[3].kind(),
-        BlockKind::ListItem {
+        document.blocks()[3].list_item(),
+        Some(ListItem {
             depth: 2,
             marker: ListMarker::Unordered,
             continuation: false,
-            content: ListItemContent::Paragraph,
-        }
+        })
     );
+    assert_eq!(document.blocks()[3].kind(), BlockKind::Paragraph);
     assert_eq!(document.blocks()[3].text(), "child");
 }

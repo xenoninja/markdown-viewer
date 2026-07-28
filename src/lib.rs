@@ -7,7 +7,7 @@ mod ui;
 
 pub use app::{Command, Harness, ReadingSession};
 pub use document::{
-    Block, BlockKind, Document, HeadingLevel, InlineSpan, InlineStyle, ListItemContent, ListMarker,
+    Block, BlockKind, Document, HeadingLevel, InlineSpan, InlineStyle, ListItem, ListMarker,
 };
 pub use layout::{
     CellLocation, CellStyle, RenderedDocument, RenderedRow, SemanticPosition, layout,

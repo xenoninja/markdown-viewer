@@ -68,10 +68,13 @@ impl CellStyle {
 
     fn from_semantics(kind: BlockKind, inline: InlineStyle, link: bool) -> Self {
         Self {
-            heading_level: kind.heading_level(),
+            heading_level: match kind {
+                BlockKind::Heading(level) => Some(level),
+                _ => None,
+            },
             inline,
             link,
-            thematic_break: kind.is_thematic_break(),
+            thematic_break: kind == BlockKind::ThematicBreak,
         }
     }
 }
@@ -264,7 +267,7 @@ pub fn layout(document: &Document, width: u16) -> RenderedDocument {
         let leading = block_leading(block);
         let leading_width = UnicodeWidthStr::width(leading.as_str());
         let block_width = content_width.saturating_sub(leading_width).max(1);
-        if block.kind().is_thematic_break() {
+        if block.kind() == BlockKind::ThematicBreak {
             layout_thematic_break(
                 block.kind(),
                 block_index,
@@ -275,7 +278,7 @@ pub fn layout(document: &Document, width: u16) -> RenderedDocument {
             );
             continue;
         }
-        if block.kind().is_empty_list_item() {
+        if block.kind() == BlockKind::Empty {
             layout_empty_list_item(block, block_index, base_column, &mut rows);
             continue;
         }
@@ -291,12 +294,11 @@ pub fn layout(document: &Document, width: u16) -> RenderedDocument {
 
 fn block_leading(block: &Block) -> String {
     let mut leading = "│ ".repeat(block.quote_depth());
-    if let BlockKind::ListItem {
+    if let Some(crate::ListItem {
         depth,
         marker,
         continuation,
-        ..
-    } = block.kind()
+    }) = block.list_item()
     {
         leading.push_str(&"  ".repeat(depth.saturating_sub(1)));
         let marker = list_marker(marker);
@@ -354,12 +356,12 @@ fn layout_empty_list_item(
     base_column: usize,
     rows: &mut Vec<RenderedRow>,
 ) {
-    let BlockKind::ListItem { depth, marker, .. } = block.kind() else {
-        unreachable!("empty list content belongs to a list item");
-    };
+    let item = block
+        .list_item()
+        .expect("empty list content belongs to a list item");
     let mut leading = "│ ".repeat(block.quote_depth());
-    leading.push_str(&"  ".repeat(depth.saturating_sub(1)));
-    let symbol = list_marker(marker).trim_end().to_owned();
+    leading.push_str(&"  ".repeat(item.depth.saturating_sub(1)));
+    let symbol = list_marker(item.marker).trim_end().to_owned();
     let column = base_column + UnicodeWidthStr::width(leading.as_str());
     rows.push(RenderedRow {
         cells: vec![RenderedCell {

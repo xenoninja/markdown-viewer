@@ -13,58 +13,17 @@ pub struct Document {
 pub enum BlockKind {
     Paragraph,
     Heading(HeadingLevel),
-    ListItem {
-        depth: usize,
-        marker: ListMarker,
-        continuation: bool,
-        content: ListItemContent,
-    },
-    ThematicBreak,
-    RawHtml,
-}
-
-/// The supported block role carried by a list item.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ListItemContent {
-    Paragraph,
-    Heading(HeadingLevel),
     ThematicBreak,
     RawHtml,
     Empty,
 }
 
-impl BlockKind {
-    pub(crate) fn heading_level(self) -> Option<HeadingLevel> {
-        match self {
-            Self::Heading(level)
-            | Self::ListItem {
-                content: ListItemContent::Heading(level),
-                ..
-            } => Some(level),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn is_thematic_break(self) -> bool {
-        matches!(
-            self,
-            Self::ThematicBreak
-                | Self::ListItem {
-                    content: ListItemContent::ThematicBreak,
-                    ..
-                }
-        )
-    }
-
-    pub(crate) fn is_empty_list_item(self) -> bool {
-        matches!(
-            self,
-            Self::ListItem {
-                content: ListItemContent::Empty,
-                ..
-            }
-        )
-    }
+/// List hierarchy attached independently to a block's semantic role.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ListItem {
+    pub depth: usize,
+    pub marker: ListMarker,
+    pub continuation: bool,
 }
 
 /// A Markdown heading's declared level.
@@ -93,6 +52,7 @@ pub struct Block {
     spans: Vec<InlineSpan>,
     text: String,
     quote_depth: usize,
+    list_item: Option<ListItem>,
 }
 
 impl Block {
@@ -114,6 +74,11 @@ impl Block {
     #[must_use]
     pub fn quote_depth(&self) -> usize {
         self.quote_depth
+    }
+
+    #[must_use]
+    pub fn list_item(&self) -> Option<ListItem> {
+        self.list_item
     }
 }
 
@@ -198,18 +163,14 @@ impl Document {
                     builder = Some(if items.is_empty() {
                         BlockBuilder::new(BlockKind::Heading(level), quote_depth)
                     } else {
-                        block_builder_for_item(
-                            &mut items,
-                            quote_depth,
-                            ListItemContent::Heading(level),
-                        )
+                        block_builder_for_item(&mut items, quote_depth, BlockKind::Heading(level))
                     });
                 }
                 Event::Start(Tag::HtmlBlock) => {
                     builder = Some(if items.is_empty() {
                         BlockBuilder::new(BlockKind::RawHtml, quote_depth)
                     } else {
-                        block_builder_for_item(&mut items, quote_depth, ListItemContent::RawHtml)
+                        block_builder_for_item(&mut items, quote_depth, BlockKind::RawHtml)
                     });
                 }
                 Event::Start(Tag::BlockQuote(_)) => quote_depth += 1,
@@ -217,7 +178,7 @@ impl Document {
                     finish_builder(&mut builder, &mut blocks);
                     if items.last().is_some_and(|item| !item.started) {
                         blocks.push(
-                            block_builder_for_item(&mut items, quote_depth, ListItemContent::Empty)
+                            block_builder_for_item(&mut items, quote_depth, BlockKind::Empty)
                                 .finish(),
                         );
                     }
@@ -281,7 +242,7 @@ impl Document {
                     finish_builder(&mut builder, &mut blocks);
                     if items.last().is_some_and(|item| !item.started) {
                         blocks.push(
-                            block_builder_for_item(&mut items, quote_depth, ListItemContent::Empty)
+                            block_builder_for_item(&mut items, quote_depth, BlockKind::Empty)
                                 .finish(),
                         );
                     }
@@ -305,11 +266,7 @@ impl Document {
                     let rule = if items.is_empty() {
                         BlockBuilder::new(BlockKind::ThematicBreak, quote_depth)
                     } else {
-                        block_builder_for_item(
-                            &mut items,
-                            quote_depth,
-                            ListItemContent::ThematicBreak,
-                        )
+                        block_builder_for_item(&mut items, quote_depth, BlockKind::ThematicBreak)
                     };
                     blocks.push(rule.finish());
                 }
@@ -332,6 +289,7 @@ struct BlockBuilder {
     kind: BlockKind,
     spans: Vec<InlineSpan>,
     quote_depth: usize,
+    list_item: Option<ListItem>,
 }
 
 impl BlockBuilder {
@@ -340,6 +298,7 @@ impl BlockBuilder {
             kind,
             spans: Vec::new(),
             quote_depth,
+            list_item: None,
         }
     }
 
@@ -370,6 +329,7 @@ impl BlockBuilder {
             spans: self.spans,
             text,
             quote_depth: self.quote_depth,
+            list_item: self.list_item,
         }
     }
 }
@@ -399,7 +359,7 @@ impl ListMarker {
 
 fn block_builder_for_leaf(items: &mut [ItemContext], quote_depth: usize) -> BlockBuilder {
     if !items.is_empty() {
-        return block_builder_for_item(items, quote_depth, ListItemContent::Paragraph);
+        return block_builder_for_item(items, quote_depth, BlockKind::Paragraph);
     }
 
     BlockBuilder::new(BlockKind::Paragraph, quote_depth)
@@ -408,20 +368,18 @@ fn block_builder_for_leaf(items: &mut [ItemContext], quote_depth: usize) -> Bloc
 fn block_builder_for_item(
     items: &mut [ItemContext],
     quote_depth: usize,
-    content: ListItemContent,
+    kind: BlockKind,
 ) -> BlockBuilder {
     let item = items.last_mut().expect("list content is inside an item");
     let continuation = item.started;
     item.started = true;
-    BlockBuilder::new(
-        BlockKind::ListItem {
-            depth: item.depth,
-            marker: item.marker,
-            continuation,
-            content,
-        },
-        quote_depth,
-    )
+    let mut builder = BlockBuilder::new(kind, quote_depth);
+    builder.list_item = Some(ListItem {
+        depth: item.depth,
+        marker: item.marker,
+        continuation,
+    });
+    builder
 }
 
 fn finish_builder(builder: &mut Option<BlockBuilder>, blocks: &mut Vec<Block>) {
