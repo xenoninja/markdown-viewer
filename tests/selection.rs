@@ -1,7 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use mdview::{
-    ClipboardResult, Document, Effect, Harness, SelectionMode, SemanticPosition,
-};
+use mdview::{ClipboardResult, Document, Effect, Harness, SelectionMode, SemanticPosition};
 
 #[test]
 fn characterwise_and_row_selection_start_from_the_reading_cursor() {
@@ -119,11 +117,7 @@ fn yank_preserves_code_tabs_and_omits_decorative_table_borders() {
     };
     assert_eq!(yanked, "\tindented");
 
-    let mut table = Harness::new(
-        Document::parse("| a | b |\n| - | - |\n| 1 | 2 |\n"),
-        24,
-        6,
-    );
+    let mut table = Harness::new(Document::parse("| a | b |\n| - | - |\n| 1 | 2 |\n"), 24, 6);
     table.keys("GVy");
     let yanked = match table.take_effects().pop() {
         Some(Effect::WriteClipboard(text)) => text,
@@ -160,7 +154,9 @@ fn clipboard_failure_is_reported_truthfully() {
 
 #[test]
 fn selection_survives_resize_across_wrapped_and_heterogeneous_blocks() {
-    let document = Document::parse("one two three four\n\n```\ncode\n```\n\n| x | y |\n| - | - |\n| 1 | 2 |\n");
+    let document = Document::parse(
+        "one two three four\n\n```\ncode\n```\n\n| x | y |\n| - | - |\n| 1 | 2 |\n",
+    );
     let mut harness = Harness::new(document, 40, 8);
     harness.keys("v2w");
     let anchor = harness.selection_anchor();

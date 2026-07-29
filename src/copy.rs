@@ -101,8 +101,7 @@ fn copy_rows(
         for cell in content_cells {
             let position = cell.position();
             if let Some(prior) = last_position
-                && (prior.block != position.block
-                    || table_cell_boundary(document, prior, position))
+                && (prior.block != position.block || table_cell_boundary(document, prior, position))
                 && !line.is_empty()
                 && !line.ends_with(' ')
             {
@@ -152,7 +151,9 @@ fn copy_atoms(document: &Document) -> Vec<CopyAtom> {
                                 } else {
                                     String::new()
                                 },
-                                hard_break_from_prior: row_index > 0 && cell_index == 0 && first_in_cell,
+                                hard_break_from_prior: row_index > 0
+                                    && cell_index == 0
+                                    && first_in_cell,
                                 cell_separator: cell_index > 0 && first_in_cell,
                             });
                             grapheme += span.text().graphemes(true).count();

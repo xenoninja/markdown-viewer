@@ -130,9 +130,8 @@ fn gx_on_http_link_requests_browser_effect_without_moving_cursor() {
 
 #[test]
 fn relative_and_unsupported_schemes_remain_display_only() {
-    let document = Document::parse(
-        "[rel](./other.md) [mail](mailto:a@b.c) [js](javascript:alert(1))\n",
-    );
+    let document =
+        Document::parse("[rel](./other.md) [mail](mailto:a@b.c) [js](javascript:alert(1))\n");
     let mut harness = Harness::new(document, 64, 3);
 
     for start in [0usize, 4, 9] {
@@ -185,7 +184,10 @@ fn footnotes_render_and_gx_jumps_with_history() {
         })
         .expect("footnote definition");
     assert!(definition.text().contains("First definition."));
-    assert_ne!(definition.kind(), BlockKind::Heading(mdview::HeadingLevel::H1));
+    assert_ne!(
+        definition.kind(),
+        BlockKind::Heading(mdview::HeadingLevel::H1)
+    );
 
     let mut harness = Harness::new(document, 48, 10);
     // Document starts on the first footnote reference label "[1]".
@@ -240,13 +242,11 @@ fn missing_fragment_and_browser_failure_are_non_fatal_status_messages() {
         })
     );
     assert!(
-        harness
-            .frame()
-            .lines()
-            .last()
-            .is_some_and(|line| line.to_lowercase().contains("not found")
-                || line.to_lowercase().contains("missing")
-                || line.to_lowercase().contains("no such")),
+        harness.frame().lines().last().is_some_and(|line| line
+            .to_lowercase()
+            .contains("not found")
+            || line.to_lowercase().contains("missing")
+            || line.to_lowercase().contains("no such")),
         "missing fragment status: {}",
         harness.frame()
     );
