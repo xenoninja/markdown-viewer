@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -8,6 +8,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::browser::{BrowserLauncher, BrowserResult, FakeBrowser};
 use crate::clipboard::{ClipboardResult, ClipboardWriter, FakeClipboard};
 use crate::copy::{self, SelectionMode};
 use crate::highlight::{CodeHighlighter, HighlightCache};
@@ -37,6 +38,7 @@ pub enum PaneFocus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
     WriteClipboard(String),
+    OpenBrowser(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,6 +121,7 @@ pub struct ReadingSession {
     outline_viewport: usize,
     focus: PaneFocus,
     jump_history: JumpHistory,
+    fragment_targets: BTreeMap<String, SemanticPosition>,
     viewport: usize,
     horizontal_offsets: Vec<usize>,
     preferred_column: Option<usize>,
@@ -163,6 +166,7 @@ impl ReadingSession {
             })
             .collect::<Vec<_>>();
         let outline_selection = (!outline.is_empty()).then_some(0);
+        let fragment_targets = fragment_targets(&document);
         let block_count = document.blocks().len();
         Self {
             document,
@@ -173,6 +177,7 @@ impl ReadingSession {
             outline_viewport: 0,
             focus: PaneFocus::Document,
             jump_history: JumpHistory::default(),
+            fragment_targets,
             viewport: 0,
             horizontal_offsets: vec![0; block_count],
             preferred_column: None,
@@ -302,6 +307,11 @@ impl ReadingSession {
                 self.document_row(width, height, count, false);
                 return;
             }
+            if character == 'x' {
+                self.pending_count = None;
+                self.activate_under_cursor(width, height);
+                return;
+            }
         }
 
         if self.focus == PaneFocus::Document && character == 'g' {
@@ -394,6 +404,21 @@ impl ReadingSession {
                 }
             }
         });
+    }
+
+    pub fn report_browser_result(&mut self, result: BrowserResult) {
+        match result {
+            BrowserResult::Opened => {
+                self.status_message = None;
+            }
+            BrowserResult::Failed(message) => {
+                self.status_message = Some(if message.is_empty() {
+                    "Browser failed".to_owned()
+                } else {
+                    format!("Browser failed: {message}")
+                });
+            }
+        }
     }
 
     pub fn drain_effects(&mut self) -> Vec<Effect> {
@@ -542,9 +567,16 @@ impl ReadingSession {
             self.outline_selection
                 .and_then(|selection| self.outline.get(selection))
                 .map(|entry| entry.label.clone())
+        } else if let Some(target) = self.link_target_under_cursor() {
+            Some(target)
         } else {
             self.status_warning().map(str::to_owned)
         }
+    }
+
+    fn link_target_under_cursor(&self) -> Option<String> {
+        let cursor = self.cursor?;
+        link_target_at_position(&self.document, cursor)
     }
 
     pub(crate) fn content_height(&self, screen_height: u16) -> u16 {
@@ -673,6 +705,43 @@ impl ReadingSession {
         self.move_cursor_to(target, width, height);
     }
 
+    fn activate_under_cursor(&mut self, width: u16, height: u16) {
+        let Some(cursor) = self.cursor else {
+            return;
+        };
+        let Some(target) = link_target_at_position(&self.document, cursor) else {
+            return;
+        };
+        self.activate_link_target(&target, width, height);
+    }
+
+    fn activate_link_target(&mut self, target: &str, width: u16, height: u16) {
+        self.status_message = None;
+        if let Some(fragment) = target.strip_prefix('#') {
+            let key = fragment.to_lowercase();
+            let Some(destination) = self.fragment_targets.get(&key).copied() else {
+                self.status_message = Some(format!("Target not found: #{fragment}"));
+                return;
+            };
+            if let Some(cursor) = self.cursor {
+                self.jump_history.record(cursor);
+            }
+            self.move_cursor_to(destination, width, height);
+            return;
+        }
+
+        if is_web_url(target) {
+            self.effects.push(Effect::OpenBrowser(target.to_owned()));
+            return;
+        }
+
+        self.status_message = Some(if looks_like_relative_path(target) {
+            "Relative links cannot be opened".to_owned()
+        } else {
+            format!("Unsupported link scheme: {target}")
+        });
+    }
+
     fn traverse_jump_history(&mut self, direction: JumpDirection, width: u16, height: u16) {
         let Some(cursor) = self.cursor else {
             return;
@@ -684,21 +753,33 @@ impl ReadingSession {
     }
 
     fn move_cursor_to(&mut self, target: SemanticPosition, width: u16, height: u16) {
+        let had_status = self.status_text().is_some();
         self.cursor = Some(target);
         self.preferred_column = None;
+        let height = self.height_after_cursor_change(height, had_status);
         self.ensure_horizontal_cursor_visible(width, target);
         let rendered = self.rendered(width);
         self.ensure_cursor_visible(&rendered, height);
         self.ensure_outline_context_visible(height);
     }
 
+    fn height_after_cursor_change(&self, height: u16, had_status: bool) -> u16 {
+        match (had_status, self.status_text().is_some()) {
+            (false, true) => height.saturating_sub(1),
+            (true, false) => height.saturating_add(1),
+            _ => height,
+        }
+    }
+
     fn motion(&mut self, width: u16, height: u16, motion: Motion, count: usize) {
+        let had_status = self.status_text().is_some();
         let rendered = self.rendered(width);
         let Some(cursor) = self.cursor else {
             return;
         };
         let Some(location) = rendered.cell_for_position(cursor) else {
             self.cursor = rendered.first_position();
+            let height = self.height_after_cursor_change(height, had_status);
             self.ensure_cursor_visible(&rendered, height);
             self.ensure_outline_context_visible(height);
             return;
@@ -752,12 +833,14 @@ impl ReadingSession {
             self.cursor = Some(target);
             self.ensure_horizontal_cursor_visible(width, target);
         }
+        let height = self.height_after_cursor_change(height, had_status);
         let rendered = self.rendered(width);
         self.ensure_cursor_visible(&rendered, height);
         self.ensure_outline_context_visible(height);
     }
 
     fn document_row(&mut self, width: u16, height: u16, count: Option<usize>, end: bool) {
+        let had_status = self.status_text().is_some();
         let rendered = self.rendered(width);
         self.preferred_column = None;
         self.cursor = match count {
@@ -771,6 +854,7 @@ impl ReadingSession {
             _ if end => rendered.last_position(),
             _ => rendered.first_position(),
         };
+        let height = self.height_after_cursor_change(height, had_status);
         if let Some(cursor) = self.cursor {
             self.ensure_horizontal_cursor_visible(width, cursor);
         }
@@ -1096,6 +1180,141 @@ fn outline_label(block: &crate::Block) -> String {
         .collect()
 }
 
+fn fragment_targets(document: &Document) -> BTreeMap<String, SemanticPosition> {
+    let mut targets = BTreeMap::new();
+    let mut heading_counts = HashMap::<String, usize>::new();
+
+    for (block_index, block) in document.blocks().iter().enumerate() {
+        if matches!(block.kind(), BlockKind::Heading(_)) {
+            let base = github_heading_slug(block.text());
+            let slug = unique_heading_slug(&base, &mut heading_counts);
+            targets.entry(slug).or_insert(SemanticPosition {
+                block: block_index,
+                grapheme: 0,
+            });
+        }
+
+        let mut grapheme = 0_usize;
+        for span in block_spans(block) {
+            let span_graphemes = span_grapheme_count(span);
+            if let Some(target) = span.link_target() {
+                if let Some(label) = target.strip_prefix("#fn-") {
+                    let label = label.to_lowercase();
+                    targets.entry(format!("fnref-{label}")).or_insert(SemanticPosition {
+                        block: block_index,
+                        grapheme,
+                    });
+                } else if let Some(label) = target.strip_prefix("#fnref-") {
+                    let label = label.to_lowercase();
+                    targets.entry(format!("fn-{label}")).or_insert(SemanticPosition {
+                        block: block_index,
+                        grapheme,
+                    });
+                }
+            }
+            grapheme += span_graphemes;
+        }
+    }
+
+    targets
+}
+
+fn block_spans(block: &crate::Block) -> Vec<&crate::InlineSpan> {
+    if let Some(table) = block.table() {
+        table
+            .rows()
+            .iter()
+            .flat_map(|row| row.cells())
+            .flat_map(|cell| cell.spans())
+            .collect()
+    } else {
+        block.spans().iter().collect()
+    }
+}
+
+fn span_grapheme_count(span: &crate::InlineSpan) -> usize {
+    if span.image().is_some() {
+        1
+    } else {
+        span.text().graphemes(true).count()
+    }
+}
+
+fn link_target_at_position(document: &Document, cursor: SemanticPosition) -> Option<String> {
+    let block = document.blocks().get(cursor.block)?;
+    if let Some(table) = block.table() {
+        for cell in table.rows().iter().flat_map(|row| row.cells()) {
+            let mut grapheme = cell.grapheme_offset();
+            for span in cell.spans() {
+                let count = span_grapheme_count(span);
+                if cursor.grapheme >= grapheme && cursor.grapheme < grapheme + count {
+                    return span.link_target().map(str::to_owned);
+                }
+                grapheme += count;
+            }
+        }
+        return None;
+    }
+
+    let mut grapheme = 0_usize;
+    for span in block.spans() {
+        let count = span_grapheme_count(span);
+        if cursor.grapheme >= grapheme && cursor.grapheme < grapheme + count {
+            return span.link_target().map(str::to_owned);
+        }
+        grapheme += count;
+    }
+    None
+}
+
+fn github_heading_slug(text: &str) -> String {
+    let mut slug = String::with_capacity(text.len());
+    for character in text.to_lowercase().chars() {
+        if character.is_whitespace() {
+            slug.push('-');
+            continue;
+        }
+        if github_slug_keeps(character) {
+            slug.push(character);
+        }
+    }
+    slug
+}
+
+fn github_slug_keeps(character: char) -> bool {
+    match character {
+        '\u{2000}'..='\u{206F}' | '\u{2E00}'..='\u{2E7F}' => false,
+        '\'' | '!' | '"' | '#' | '$' | '%' | '&' | '(' | ')' | '*' | '+' | ',' | '.' | '/'
+        | ':' | ';' | '<' | '=' | '>' | '?' | '@' | '[' | '\\' | ']' | '^' | '`' | '{' | '|'
+        | '}' | '~' => false,
+        _ => true,
+    }
+}
+
+fn unique_heading_slug(base: &str, counts: &mut HashMap<String, usize>) -> String {
+    let mut slug = base.to_owned();
+    let original = base.to_owned();
+    while counts.contains_key(&slug) {
+        let next = counts.get(&original).copied().unwrap_or(0).saturating_add(1);
+        counts.insert(original.clone(), next);
+        slug = format!("{original}-{next}");
+    }
+    counts.insert(slug.clone(), 0);
+    slug
+}
+
+fn looks_like_relative_path(target: &str) -> bool {
+    target.starts_with("./")
+        || target.starts_with("../")
+        || target.starts_with('/')
+        || (!target.contains(':') && !target.starts_with('#'))
+}
+
+fn is_web_url(target: &str) -> bool {
+    let lower = target.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Motion {
     Left,
@@ -1302,6 +1521,7 @@ pub struct Harness {
     session: ReadingSession,
     terminal: Terminal<TestBackend>,
     clipboard: FakeClipboard,
+    browser: FakeBrowser,
     effect_log: Vec<Effect>,
 }
 
@@ -1336,6 +1556,7 @@ impl Harness {
             session,
             terminal,
             clipboard: FakeClipboard::succeeding(),
+            browser: FakeBrowser::succeeding(),
             effect_log: Vec::new(),
         };
         harness.draw();
@@ -1344,6 +1565,10 @@ impl Harness {
 
     pub fn set_clipboard_result(&mut self, result: ClipboardResult) {
         self.clipboard.result = result;
+    }
+
+    pub fn set_browser_result(&mut self, result: BrowserResult) {
+        self.browser.result = result;
     }
 
     pub fn take_effects(&mut self) -> Vec<Effect> {
@@ -1356,6 +1581,10 @@ impl Harness {
                 Effect::WriteClipboard(text) => {
                     let result = self.clipboard.write_text(text);
                     self.session.report_clipboard_result(result);
+                }
+                Effect::OpenBrowser(url) => {
+                    let result = self.browser.open_url(url);
+                    self.session.report_browser_result(result);
                 }
             }
             self.effect_log.push(effect);

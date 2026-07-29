@@ -1,4 +1,5 @@
 mod app;
+mod browser;
 mod clipboard;
 mod copy;
 mod document;
@@ -10,6 +11,7 @@ mod terminal;
 mod ui;
 
 pub use app::{Command, Effect, Harness, PaneFocus, ReadingSession};
+pub use browser::{BrowserLauncher, BrowserResult, FakeBrowser, SystemBrowser};
 pub use clipboard::{
     ClipboardAdapter, ClipboardMethod, ClipboardResult, ClipboardWriter, FakeClipboard,
     SystemClipboard, encode_osc52,

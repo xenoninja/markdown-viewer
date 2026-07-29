@@ -331,7 +331,8 @@ impl Document {
             | Options::ENABLE_TASKLISTS
             | Options::ENABLE_TABLES
             | Options::ENABLE_GFM
-            | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS;
+            | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+            | Options::ENABLE_FOOTNOTES;
         let mut blocks = Vec::new();
         let mut builder = None;
         let mut table = None;
@@ -342,6 +343,8 @@ impl Document {
         let mut alerts = Vec::new();
         let mut lists = Vec::new();
         let mut items = Vec::new();
+        let mut footnote_definition = None;
+        let mut footnote_needs_label = false;
 
         for event in Parser::new_ext(markdown, options) {
             match event {
@@ -385,6 +388,17 @@ impl Document {
                     if items.is_empty() {
                         builder = Some(BlockBuilder::new(BlockKind::Paragraph, quote_depth));
                     }
+                    attach_footnote_definition_label(
+                        &mut builder,
+                        &mut footnote_needs_label,
+                        footnote_definition.as_deref(),
+                        style,
+                    );
+                }
+                Event::Start(Tag::FootnoteDefinition(name)) => {
+                    finish_builder(&mut builder, &mut blocks);
+                    footnote_definition = Some(make_inert(&name));
+                    footnote_needs_label = true;
                 }
                 Event::Start(Tag::Heading { level, .. }) => {
                     let level = heading_level(level);
@@ -464,6 +478,22 @@ impl Document {
                         target: make_inert(&dest_url),
                     });
                 }
+                Event::FootnoteReference(name) => {
+                    let label = make_inert(&name);
+                    let target = format!("#fn-{label}");
+                    if builder.is_none() && !items.is_empty() {
+                        builder = Some(block_builder_for_leaf(&mut items, quote_depth));
+                    }
+                    attach_footnote_definition_label(
+                        &mut builder,
+                        &mut footnote_needs_label,
+                        footnote_definition.as_deref(),
+                        style,
+                    );
+                    if let Some(builder) = &mut builder {
+                        builder.push(&format!("[{label}]"), style, Some(target.as_str()));
+                    }
+                }
                 Event::Text(text) | Event::InlineHtml(text) | Event::Html(text) => {
                     if let Some(image) = &mut image {
                         image.alt.push_str(&make_inert(&text));
@@ -476,6 +506,12 @@ impl Document {
                     if builder.is_none() && !items.is_empty() {
                         builder = Some(block_builder_for_leaf(&mut items, quote_depth));
                     }
+                    attach_footnote_definition_label(
+                        &mut builder,
+                        &mut footnote_needs_label,
+                        footnote_definition.as_deref(),
+                        style,
+                    );
                     if let Some(builder) = &mut builder {
                         let text = match builder.kind {
                             BlockKind::Code | BlockKind::FrontMatter => make_code_inert(&text),
@@ -499,6 +535,12 @@ impl Document {
                     if builder.is_none() && !items.is_empty() {
                         builder = Some(block_builder_for_leaf(&mut items, quote_depth));
                     }
+                    attach_footnote_definition_label(
+                        &mut builder,
+                        &mut footnote_needs_label,
+                        footnote_definition.as_deref(),
+                        style,
+                    );
                     if let Some(builder) = &mut builder {
                         let mut code_style = style;
                         code_style.inline_code = true;
@@ -569,6 +611,11 @@ impl Document {
                 Event::End(TagEnd::Strong) => style.strong = false,
                 Event::End(TagEnd::Strikethrough) => style.strikethrough = false,
                 Event::End(TagEnd::Link) => link_target = None,
+                Event::End(TagEnd::FootnoteDefinition) => {
+                    finish_builder(&mut builder, &mut blocks);
+                    footnote_definition = None;
+                    footnote_needs_label = false;
+                }
                 Event::End(TagEnd::Image) => {
                     let image = image.take().expect("image end follows image start");
                     if let Some(table) = &mut table {
@@ -577,6 +624,12 @@ impl Document {
                         if builder.is_none() && !items.is_empty() {
                             builder = Some(block_builder_for_leaf(&mut items, quote_depth));
                         }
+                        attach_footnote_definition_label(
+                            &mut builder,
+                            &mut footnote_needs_label,
+                            footnote_definition.as_deref(),
+                            style,
+                        );
                         if let Some(builder) = &mut builder {
                             builder.push_image(image, style);
                         }
@@ -954,6 +1007,27 @@ fn alert_kind(kind: ParsedBlockQuoteKind) -> AlertKind {
 
 fn current_alert(alerts: &[Option<AlertKind>]) -> Option<AlertKind> {
     alerts.iter().rev().copied().flatten().next()
+}
+
+fn attach_footnote_definition_label(
+    builder: &mut Option<BlockBuilder>,
+    footnote_needs_label: &mut bool,
+    footnote_definition: Option<&str>,
+    style: InlineStyle,
+) {
+    if !*footnote_needs_label {
+        return;
+    }
+    let Some(label) = footnote_definition else {
+        return;
+    };
+    let Some(builder) = builder.as_mut() else {
+        return;
+    };
+    let reverse = format!("#fnref-{label}");
+    builder.push(&format!("[{label}]"), style, Some(reverse.as_str()));
+    builder.push(" ", style, None);
+    *footnote_needs_label = false;
 }
 
 fn make_inert(text: &str) -> String {
