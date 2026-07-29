@@ -15,11 +15,17 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let input = one_input(env::args_os(), io::stdin().is_terminal())?;
-    let document = match input {
-        Input::Path(path) => mdview::load_document(path)?,
-        Input::StandardInput => mdview::load_standard_input()?,
-    };
-    mdview::run_reading_session(document)?;
+    match input {
+        Input::Path(path) => {
+            let path = std::path::PathBuf::from(path);
+            let document = mdview::load_document(&path)?;
+            mdview::run_file_backed_reading_session(document, path)?;
+        }
+        Input::StandardInput => {
+            let document = mdview::load_standard_input()?;
+            mdview::run_reading_session(document)?;
+        }
+    }
     Ok(())
 }
 

@@ -2,6 +2,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::{Document, DocumentWarning};
 
@@ -15,6 +16,7 @@ pub struct SourceError {
 enum SourceErrorKind {
     Directory,
     Read(io::Error),
+    ChangedDuringReload,
 }
 
 impl fmt::Display for SourceError {
@@ -30,6 +32,13 @@ impl fmt::Display for SourceError {
             SourceErrorKind::Read(error) => {
                 write!(formatter, "cannot read {:?}: {error}", self.path)
             }
+            SourceErrorKind::ChangedDuringReload => {
+                write!(
+                    formatter,
+                    "cannot Reload {:?}: source changed while it was being read",
+                    self.path
+                )
+            }
         }
     }
 }
@@ -39,6 +48,7 @@ impl std::error::Error for SourceError {
         match &self.kind {
             SourceErrorKind::Directory => None,
             SourceErrorKind::Read(error) => Some(error),
+            SourceErrorKind::ChangedDuringReload => None,
         }
     }
 }
@@ -57,12 +67,23 @@ pub fn load_document(path: impl AsRef<Path>) -> Result<Document, SourceError> {
         });
     }
 
-    let bytes = fs::read(path).map_err(|error| SourceError {
-        path: path.to_owned(),
-        kind: SourceErrorKind::Read(error),
-    })?;
+    let bytes = read_document_bytes(path)?;
 
     Ok(parse_bytes(&bytes))
+}
+
+pub(crate) fn reload_document(path: impl AsRef<Path>) -> Result<Document, SourceError> {
+    let path = path.as_ref();
+    let first = read_document_bytes(path)?;
+    std::thread::sleep(Duration::from_millis(50));
+    let second = read_document_bytes(path)?;
+    if first != second {
+        return Err(SourceError {
+            path: path.to_owned(),
+            kind: SourceErrorKind::ChangedDuringReload,
+        });
+    }
+    Ok(parse_bytes(&second))
 }
 
 pub fn load_standard_input() -> io::Result<Document> {
@@ -72,6 +93,13 @@ pub fn load_standard_input() -> io::Result<Document> {
     })?;
 
     Ok(parse_bytes(&bytes))
+}
+
+fn read_document_bytes(path: &Path) -> Result<Vec<u8>, SourceError> {
+    fs::read(path).map_err(|error| SourceError {
+        path: path.to_owned(),
+        kind: SourceErrorKind::Read(error),
+    })
 }
 
 fn parse_bytes(bytes: &[u8]) -> Document {

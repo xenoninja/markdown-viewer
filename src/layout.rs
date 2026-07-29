@@ -380,6 +380,21 @@ pub fn layout(document: &Document, width: u16) -> RenderedDocument {
     layout_with_offsets(document, width, &[])
 }
 
+pub(crate) fn logical_positions(document: &Document) -> Vec<SemanticPosition> {
+    layout(document, MAX_PROSE_WIDTH as u16)
+        .rows()
+        .iter()
+        .flat_map(|row| row.cells())
+        .filter(|cell| cell.is_navigable())
+        .map(RenderedCell::position)
+        .fold(Vec::new(), |mut positions, position| {
+            if positions.last() != Some(&position) {
+                positions.push(position);
+            }
+            positions
+        })
+}
+
 pub(crate) fn layout_with_offsets(
     document: &Document,
     width: u16,

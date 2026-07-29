@@ -5,6 +5,7 @@ mod copy;
 mod document;
 mod highlight;
 mod layout;
+mod reload;
 mod search;
 mod source;
 mod terminal;
@@ -26,4 +27,4 @@ pub use layout::{
     CellLocation, CellStyle, RenderedDocument, RenderedRow, SemanticPosition, layout,
 };
 pub use source::{SourceError, load_document, load_standard_input};
-pub use terminal::run_reading_session;
+pub use terminal::{run_file_backed_reading_session, run_reading_session};

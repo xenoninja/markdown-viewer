@@ -51,6 +51,7 @@ pub trait CodeHighlighter: Send + 'static {
 
 #[derive(Debug)]
 struct HighlightRequest {
+    revision: u64,
     block: usize,
     language: String,
     code: String,
@@ -58,6 +59,7 @@ struct HighlightRequest {
 
 #[derive(Debug)]
 struct HighlightResult {
+    revision: u64,
     block: usize,
     styles: Option<Vec<HighlightStyle>>,
 }
@@ -69,6 +71,7 @@ pub(crate) struct HighlightCache {
     requested: HashSet<usize>,
     styles: HashMap<usize, Vec<HighlightStyle>>,
     pending: usize,
+    revision: u64,
 }
 
 impl HighlightCache {
@@ -97,6 +100,7 @@ impl HighlightCache {
                     .flatten();
                 if result_sender
                     .send(HighlightResult {
+                        revision: request.revision,
                         block: request.block,
                         styles,
                     })
@@ -113,6 +117,7 @@ impl HighlightCache {
             requested: HashSet::new(),
             styles: HashMap::new(),
             pending: 0,
+            revision: 0,
         }
     }
 
@@ -123,6 +128,7 @@ impl HighlightCache {
         if self
             .requests
             .send(HighlightRequest {
+                revision: self.revision,
                 block,
                 language: language.to_owned(),
                 code: code.to_owned(),
@@ -136,6 +142,9 @@ impl HighlightCache {
     pub(crate) fn collect(&mut self) -> bool {
         let mut changed = false;
         while let Ok(result) = self.results.try_recv() {
+            if result.revision != self.revision {
+                continue;
+            }
             self.pending = self.pending.saturating_sub(1);
             if let Some(styles) = result.styles {
                 self.styles.insert(result.block, styles);
@@ -151,6 +160,13 @@ impl HighlightCache {
 
     pub(crate) fn is_pending(&self) -> bool {
         self.pending > 0
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.requested.clear();
+        self.styles.clear();
+        self.pending = 0;
     }
 }
 

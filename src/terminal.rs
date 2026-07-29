@@ -22,6 +22,17 @@ use crate::clipboard::{ClipboardWriter, SystemClipboard};
 use crate::ui;
 
 pub fn run_reading_session(document: Document) -> io::Result<()> {
+    run_session(ReadingSession::new(document))
+}
+
+pub fn run_file_backed_reading_session(
+    document: Document,
+    path: std::path::PathBuf,
+) -> io::Result<()> {
+    run_session(ReadingSession::with_source(document, path))
+}
+
+fn run_session(mut session: ReadingSession) -> io::Result<()> {
     if !stdout().is_terminal() {
         return Err(io::Error::other(
             "standard output must be an interactive terminal",
@@ -32,7 +43,6 @@ pub fn run_reading_session(document: Document) -> io::Result<()> {
     let _session = TerminalSession::enter()?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
-    let mut session = ReadingSession::new(document);
     let mut clipboard = SystemClipboard::with_osc52_writer(stdout());
     let mut browser = SystemBrowser::new();
     let initial_area = terminal.size()?;
@@ -53,7 +63,13 @@ pub fn run_reading_session(document: Document) -> io::Result<()> {
             Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                 let area = terminal.size()?;
                 session.key(key, area.width, area.height);
-                apply_effects(&mut session, &mut clipboard, &mut browser);
+                apply_effects(
+                    &mut session,
+                    &mut clipboard,
+                    &mut browser,
+                    area.width,
+                    area.height,
+                );
             }
             Some(Event::Resize(width, height)) => session.resize(width, height),
             _ => {}
@@ -67,6 +83,8 @@ fn apply_effects(
     session: &mut ReadingSession,
     clipboard: &mut SystemClipboard,
     browser: &mut SystemBrowser,
+    width: u16,
+    height: u16,
 ) {
     for effect in session.drain_effects() {
         match effect {
@@ -77,6 +95,9 @@ fn apply_effects(
             Effect::OpenBrowser(url) => {
                 let result = browser.open_url(&url);
                 session.report_browser_result(result);
+            }
+            Effect::ReloadDocument(path) => {
+                crate::reload::apply(session, &path, width, height);
             }
         }
     }

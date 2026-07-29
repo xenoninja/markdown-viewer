@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
@@ -12,7 +12,9 @@ use crate::browser::{BrowserLauncher, BrowserResult, FakeBrowser};
 use crate::clipboard::{ClipboardResult, ClipboardWriter, FakeClipboard};
 use crate::copy::{self, SelectionMode};
 use crate::highlight::{CodeHighlighter, HighlightCache};
-use crate::layout::{CellLocation, RenderedDocument, SemanticPosition, layout, layout_with_state};
+use crate::layout::{
+    CellLocation, RenderedDocument, SemanticPosition, layout, layout_with_state, logical_positions,
+};
 use crate::search::{SearchMatch, find_matches};
 use crate::source::{SourceError, load_document};
 use crate::ui;
@@ -39,6 +41,7 @@ pub enum PaneFocus {
 pub enum Effect {
     WriteClipboard(String),
     OpenBrowser(String),
+    ReloadDocument(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,7 +115,22 @@ struct SearchPrompt {
 }
 
 #[derive(Debug)]
+struct ReloadContext {
+    heading_path: Option<Vec<(HeadingLevel, String)>>,
+    heading_path_occurrence: usize,
+    section_anchor: RelativeAnchor,
+    document_anchor: RelativeAnchor,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RelativeAnchor {
+    ordinal: usize,
+    extent: usize,
+}
+
+#[derive(Debug)]
 pub struct ReadingSession {
+    source: Option<PathBuf>,
     document: Document,
     cursor: Option<SemanticPosition>,
     outline: Vec<OutlineEntry>,
@@ -144,31 +162,25 @@ pub struct ReadingSession {
 impl ReadingSession {
     #[must_use]
     pub fn new(document: Document) -> Self {
-        Self::with_highlight_cache(document, HighlightCache::syntect())
+        Self::with_highlight_cache(document, None, HighlightCache::syntect())
     }
 
-    fn with_highlight_cache(document: Document, highlighting: HighlightCache) -> Self {
+    pub(crate) fn with_source(document: Document, source: PathBuf) -> Self {
+        Self::with_highlight_cache(document, Some(source), HighlightCache::syntect())
+    }
+
+    fn with_highlight_cache(
+        document: Document,
+        source: Option<PathBuf>,
+        highlighting: HighlightCache,
+    ) -> Self {
         let cursor = layout(&document, 100).first_position();
-        let outline = document
-            .blocks()
-            .iter()
-            .enumerate()
-            .filter_map(|(block, content)| {
-                let BlockKind::Heading(level) = content.kind() else {
-                    return None;
-                };
-                Some(OutlineEntry {
-                    position: SemanticPosition { block, grapheme: 0 },
-                    level,
-                    label: outline_label(content),
-                    collapsed: false,
-                })
-            })
-            .collect::<Vec<_>>();
+        let outline = outline_entries(&document);
         let outline_selection = (!outline.is_empty()).then_some(0);
         let fragment_targets = fragment_targets(&document);
         let block_count = document.blocks().len();
         Self {
+            source,
             document,
             cursor,
             outline,
@@ -325,6 +337,10 @@ impl ReadingSession {
             self.toggle_outline(width, screen_height);
             return;
         }
+        if character == 'r' {
+            self.request_reload();
+            return;
+        }
         if self.focus == PaneFocus::Outline {
             match character {
                 'q' => self.command(Command::Quit),
@@ -362,6 +378,63 @@ impl ReadingSession {
             'n' => self.navigate_search(true, width, height),
             'N' => self.navigate_search(false, width, height),
             _ => self.clear_pending(),
+        }
+    }
+
+    fn request_reload(&mut self) {
+        if let Some(path) = &self.source {
+            self.effects.push(Effect::ReloadDocument(path.clone()));
+            self.status_message = None;
+        } else {
+            self.status_message =
+                Some("Reload unavailable: standard-input Documents cannot be reloaded".to_owned());
+        }
+        self.clear_pending();
+    }
+
+    pub fn report_reload_result(
+        &mut self,
+        result: Result<Document, SourceError>,
+        width: u16,
+        screen_height: u16,
+    ) {
+        match result {
+            Ok(document) => {
+                let context = ReloadContext::capture(self);
+                self.document = document;
+                self.outline = outline_entries(&self.document);
+                self.cursor = context.position_in(&self.document, &self.outline);
+                self.outline_selection = self.cursor.and_then(|cursor| {
+                    self.outline
+                        .iter()
+                        .rposition(|entry| entry.position.block <= cursor.block)
+                });
+                if self.outline_selection.is_none() && !self.outline.is_empty() {
+                    self.outline_selection = Some(0);
+                }
+                self.outline_viewport = 0;
+                self.fragment_targets = fragment_targets(&self.document);
+                self.viewport = 0;
+                self.horizontal_offsets = vec![0; self.document.blocks().len()];
+                self.preferred_column = None;
+                self.jump_history = JumpHistory::default();
+                self.search_prompt = None;
+                self.search_matches.clear();
+                self.search_highlights.clear();
+                self.search_leading_highlights.clear();
+                self.search_query = None;
+                self.search_message = None;
+                self.selection = None;
+                self.highlighting.reset();
+                self.status_message = Some(self.status_warning().map_or_else(
+                    || "Reloaded".to_owned(),
+                    |warning| format!("Reloaded: {warning}"),
+                ));
+                self.resize(width, screen_height);
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Reload failed: {error}"));
+            }
         }
     }
 
@@ -1133,6 +1206,98 @@ impl ReadingSession {
     }
 }
 
+impl ReloadContext {
+    fn capture(session: &ReadingSession) -> Self {
+        let document_positions = logical_positions(&session.document);
+        let section_index = session.current_section().and_then(|section| {
+            session
+                .outline
+                .iter()
+                .position(|entry| entry.position == section)
+        });
+        let heading_paths = heading_paths(&session.outline);
+        let heading_path = section_index.map(|index| heading_paths[index].clone());
+        let heading_path_occurrence = section_index
+            .zip(heading_path.as_ref())
+            .map(|(section, path)| {
+                heading_paths[..section]
+                    .iter()
+                    .filter(|candidate| *candidate == path)
+                    .count()
+            })
+            .unwrap_or_default();
+        let section_positions = section_index
+            .map(|index| positions_in_section(&document_positions, &session.outline, index))
+            .unwrap_or_default();
+
+        Self {
+            heading_path,
+            heading_path_occurrence,
+            section_anchor: RelativeAnchor::capture(&section_positions, session.cursor),
+            document_anchor: RelativeAnchor::capture(&document_positions, session.cursor),
+        }
+    }
+
+    fn position_in(
+        &self,
+        document: &Document,
+        outline: &[OutlineEntry],
+    ) -> Option<SemanticPosition> {
+        let document_positions = logical_positions(document);
+        if let Some(path) = &self.heading_path {
+            let heading_paths = heading_paths(outline);
+            let section = heading_paths
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| *candidate == path)
+                .nth(self.heading_path_occurrence)
+                .map(|(index, _)| index);
+            if let Some(section) = section {
+                let positions = positions_in_section(&document_positions, outline, section);
+                if let Some(position) = self.section_anchor.restore(&positions) {
+                    return Some(position);
+                }
+            }
+        }
+
+        self.document_anchor
+            .restore(&document_positions)
+            .or_else(|| layout(document, 100).first_position())
+    }
+}
+
+impl RelativeAnchor {
+    fn capture(positions: &[SemanticPosition], cursor: Option<SemanticPosition>) -> Self {
+        let ordinal = cursor
+            .map(|cursor| {
+                positions
+                    .partition_point(|candidate| *candidate <= cursor)
+                    .saturating_sub(1)
+            })
+            .unwrap_or_default();
+        Self {
+            ordinal,
+            extent: positions.len(),
+        }
+    }
+
+    fn restore(self, positions: &[SemanticPosition]) -> Option<SemanticPosition> {
+        if positions.is_empty() {
+            return None;
+        }
+        let ordinal = if self.extent <= 1 {
+            0
+        } else {
+            self.ordinal
+                .min(self.extent - 1)
+                .saturating_mul(positions.len() - 1)
+                .saturating_add((self.extent - 1) / 2)
+                / (self.extent - 1)
+        };
+        positions.get(ordinal).copied()
+    }
+}
+
 fn selection_contains(
     selection: Selection,
     cursor: SemanticPosition,
@@ -1177,6 +1342,57 @@ fn outline_label(block: &crate::Block) -> String {
                 },
             )
         })
+        .collect()
+}
+
+fn outline_entries(document: &Document) -> Vec<OutlineEntry> {
+    document
+        .blocks()
+        .iter()
+        .enumerate()
+        .filter_map(|(block, content)| {
+            let BlockKind::Heading(level) = content.kind() else {
+                return None;
+            };
+            Some(OutlineEntry {
+                position: SemanticPosition { block, grapheme: 0 },
+                level,
+                label: outline_label(content),
+                collapsed: false,
+            })
+        })
+        .collect()
+}
+
+fn heading_paths(outline: &[OutlineEntry]) -> Vec<Vec<(HeadingLevel, String)>> {
+    let mut current = Vec::<(HeadingLevel, String)>::new();
+    let mut paths = Vec::with_capacity(outline.len());
+    for entry in outline {
+        while current
+            .last()
+            .is_some_and(|(level, _)| level.depth() >= entry.level.depth())
+        {
+            current.pop();
+        }
+        current.push((entry.level, entry.label.clone()));
+        paths.push(current.clone());
+    }
+    paths
+}
+
+fn positions_in_section(
+    positions: &[SemanticPosition],
+    outline: &[OutlineEntry],
+    index: usize,
+) -> Vec<SemanticPosition> {
+    let start = outline[index].position.block;
+    let end = outline
+        .get(index + 1)
+        .map_or(usize::MAX, |entry| entry.position.block);
+    positions
+        .iter()
+        .copied()
+        .filter(|position| (start..end).contains(&position.block))
         .collect()
 }
 
@@ -1541,6 +1757,7 @@ impl Harness {
         Self::with_session(
             ReadingSession::with_highlight_cache(
                 document,
+                None,
                 HighlightCache::with_highlighter(highlighter),
             ),
             width,
@@ -1586,13 +1803,40 @@ impl Harness {
                     let result = self.browser.open_url(url);
                     self.session.report_browser_result(result);
                 }
+                Effect::ReloadDocument(path) => {
+                    let area = self.terminal.backend().buffer().area;
+                    crate::reload::apply(&mut self.session, path, area.width, area.height);
+                }
             }
             self.effect_log.push(effect);
         }
     }
 
     pub fn open(path: impl AsRef<Path>, width: u16, height: u16) -> Result<Self, SourceError> {
-        Ok(Self::new(load_document(path)?, width, height))
+        let path = path.as_ref().to_owned();
+        Ok(Self::with_session(
+            ReadingSession::with_source(load_document(&path)?, path),
+            width,
+            height,
+        ))
+    }
+
+    pub fn open_with_highlighter(
+        path: impl AsRef<Path>,
+        width: u16,
+        height: u16,
+        highlighter: impl CodeHighlighter,
+    ) -> Result<Self, SourceError> {
+        let path = path.as_ref().to_owned();
+        Ok(Self::with_session(
+            ReadingSession::with_highlight_cache(
+                load_document(&path)?,
+                Some(path),
+                HighlightCache::with_highlighter(highlighter),
+            ),
+            width,
+            height,
+        ))
     }
 
     pub fn command(&mut self, command: Command) {
