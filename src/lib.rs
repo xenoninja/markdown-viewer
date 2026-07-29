@@ -24,7 +24,7 @@ pub use document::{
 };
 pub use highlight::{CodeHighlighter, HighlightStyle};
 pub use layout::{
-    CellLocation, CellStyle, RenderedDocument, RenderedRow, SemanticPosition, layout,
+    CellLocation, CellStyle, LayoutMetrics, RenderedDocument, RenderedRow, SemanticPosition, layout,
 };
 pub use source::{SourceError, load_document, load_standard_input};
 pub use terminal::{run_file_backed_reading_session, run_reading_session};

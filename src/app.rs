@@ -1,3 +1,4 @@
+use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -14,7 +15,8 @@ use crate::clipboard::{ClipboardResult, ClipboardWriter, FakeClipboard};
 use crate::copy::{self, SelectionMode};
 use crate::highlight::{CodeHighlighter, HighlightCache};
 use crate::layout::{
-    CellLocation, RenderedDocument, SemanticPosition, layout, layout_with_state, logical_positions,
+    CellLocation, LayoutCache, LayoutMetrics, RenderedDocument, SemanticPosition, layout,
+    logical_positions,
 };
 use crate::search::{SearchMatch, find_matches};
 use crate::source::{SourceError, load_document};
@@ -201,6 +203,7 @@ pub struct ReadingSession {
     presentation: ViewerPresentation,
     document: Document,
     cursor: Option<SemanticPosition>,
+    logical_positions: Vec<SemanticPosition>,
     outline: Vec<OutlineEntry>,
     outline_enabled: bool,
     outline_selection: Option<usize>,
@@ -226,6 +229,7 @@ pub struct ReadingSession {
     effects: Vec<Effect>,
     quit: bool,
     highlighting: HighlightCache,
+    layout_cache: RefCell<LayoutCache>,
 }
 
 impl ReadingSession {
@@ -255,7 +259,8 @@ impl ReadingSession {
         presentation: ViewerPresentation,
         highlighting: HighlightCache,
     ) -> Self {
-        let cursor = layout(&document, 100).first_position();
+        let logical_positions = logical_positions(&document);
+        let cursor = logical_positions.first().copied();
         let outline = outline_entries(&document);
         let outline_selection = (!outline.is_empty()).then_some(0);
         let fragment_targets = fragment_targets(&document);
@@ -265,6 +270,7 @@ impl ReadingSession {
             presentation,
             document,
             cursor,
+            logical_positions,
             outline,
             outline_enabled: true,
             outline_selection,
@@ -290,6 +296,7 @@ impl ReadingSession {
             effects: Vec::new(),
             quit: false,
             highlighting,
+            layout_cache: RefCell::new(LayoutCache::default()),
         }
     }
 
@@ -396,8 +403,7 @@ impl ReadingSession {
                 prior_message: self.search_message.take(),
             });
             self.clear_pending();
-            let rendered = self.rendered(width);
-            self.ensure_cursor_visible(&rendered, self.content_height(screen_height));
+            self.ensure_cursor_visible(width, self.content_height(screen_height));
             return;
         }
 
@@ -508,9 +514,12 @@ impl ReadingSession {
         match result {
             Ok(document) => {
                 let context = ReloadContext::capture(self);
+                let logical_positions = logical_positions(&document);
                 self.document = document;
                 self.outline = outline_entries(&self.document);
-                self.cursor = context.position_in(&self.document, &self.outline);
+                self.cursor =
+                    context.position_in(&self.document, &self.outline, &logical_positions);
+                self.logical_positions = logical_positions;
                 self.outline_selection = self.cursor.and_then(|cursor| {
                     self.outline
                         .iter()
@@ -533,6 +542,7 @@ impl ReadingSession {
                 self.search_message = None;
                 self.selection = None;
                 self.highlighting.reset();
+                self.layout_cache.borrow_mut().clear();
                 let message = self.status_warning().map_or_else(
                     || "Reloaded".to_owned(),
                     |warning| format!("Reloaded: {warning}"),
@@ -570,6 +580,7 @@ impl ReadingSession {
             selection.anchor,
             cursor,
         );
+        drop(rendered);
         self.effects.push(Effect::WriteClipboard(text));
         self.clear_pending();
     }
@@ -689,18 +700,17 @@ impl ReadingSession {
         if let Some(cursor) = self.cursor {
             self.ensure_horizontal_cursor_visible(width, cursor);
         }
-        let rendered = self.rendered(width);
-        self.ensure_cursor_visible(&rendered, height);
+        self.ensure_cursor_visible(width, height);
     }
 
-    pub(crate) fn rendered(&self, width: u16) -> RenderedDocument {
+    pub(crate) fn rendered(&self, width: u16) -> Ref<'_, RenderedDocument> {
         let width = self.pane_layout(width).document_width;
-        layout_with_state(
-            &self.document,
-            width,
-            &self.horizontal_offsets,
-            self.highlighting.styles(),
-        )
+        if !self.layout_cache.borrow().is_prepared(width) {
+            self.layout_cache
+                .borrow_mut()
+                .prepare(&self.document, width, &self.horizontal_offsets);
+        }
+        Ref::map(self.layout_cache.borrow(), LayoutCache::document)
     }
 
     pub(crate) fn prepare_highlighting(&mut self, width: u16, height: u16) {
@@ -719,6 +729,7 @@ impl ReadingSession {
             .collect::<Vec<_>>();
         blocks.sort_unstable();
         blocks.dedup();
+        drop(rendered);
 
         for block_index in blocks {
             let block = &self.document.blocks()[block_index];
@@ -733,6 +744,17 @@ impl ReadingSession {
 
     pub(crate) fn highlighting_pending(&self) -> bool {
         self.highlighting.is_pending()
+    }
+
+    pub(crate) fn code_highlight(
+        &self,
+        position: SemanticPosition,
+    ) -> Option<crate::HighlightStyle> {
+        self.highlighting
+            .styles()
+            .get(&position.block)
+            .and_then(|styles| styles.get(position.grapheme))
+            .copied()
     }
 
     pub(crate) fn status_warning(&self) -> Option<&'static str> {
@@ -814,14 +836,13 @@ impl ReadingSession {
         let Some(cursor) = self.cursor else {
             return 0;
         };
-        let positions = logical_positions(&self.document);
-        let Some(index) = positions.iter().position(|position| *position == cursor) else {
+        let Ok(index) = self.logical_positions.binary_search(&cursor) else {
             return 0;
         };
-        if positions.len() <= 1 {
+        if self.logical_positions.len() <= 1 {
             100
         } else {
-            index.saturating_mul(100) / positions.len().saturating_sub(1)
+            index.saturating_mul(100) / self.logical_positions.len().saturating_sub(1)
         }
     }
 
@@ -1015,8 +1036,7 @@ impl ReadingSession {
         if let Some(cursor) = self.cursor {
             self.ensure_horizontal_cursor_visible(width, cursor);
         }
-        let rendered = self.rendered(width);
-        self.ensure_cursor_visible(&rendered, height);
+        self.ensure_cursor_visible(width, height);
         self.ensure_outline_context_visible(height);
     }
 
@@ -1036,8 +1056,8 @@ impl ReadingSession {
             'd' => self.motion(width, height, Motion::Down, half_page_distance),
             'b' => self.motion(width, height, Motion::Up, page_distance),
             'f' => self.motion(width, height, Motion::Down, page_distance),
-            'e' => self.scroll(&self.rendered(width), height, scroll_distance),
-            'y' => self.scroll(&self.rendered(width), height, -scroll_distance),
+            'e' => self.scroll(width, height, scroll_distance),
+            'y' => self.scroll(width, height, -scroll_distance),
             'o' => self.traverse_jump_history(JumpDirection::Backward, width, height),
             'i' => self.traverse_jump_history(JumpDirection::Forward, width, height),
             _ => {}
@@ -1112,8 +1132,7 @@ impl ReadingSession {
         self.preferred_column = None;
         let height = self.height_after_cursor_change(height, had_status);
         self.ensure_horizontal_cursor_visible(width, target);
-        let rendered = self.rendered(width);
-        self.ensure_cursor_visible(&rendered, height);
+        self.ensure_cursor_visible(width, height);
         self.ensure_outline_context_visible(height);
     }
 
@@ -1132,72 +1151,75 @@ impl ReadingSession {
             return;
         };
         let Some(location) = rendered.cell_for_position(cursor) else {
-            self.cursor = rendered.first_position();
+            let first_position = rendered.first_position();
+            drop(rendered);
+            self.cursor = first_position;
             let height = self.height_after_cursor_change(height, had_status);
-            self.ensure_cursor_visible(&rendered, height);
+            self.ensure_cursor_visible(width, height);
             self.ensure_outline_context_visible(height);
             return;
         };
 
-        let target = match motion {
+        let (target, preferred_column) = match motion {
             Motion::Left | Motion::Right => {
-                self.preferred_column = None;
-                horizontal_target(&rendered, location, motion, count)
+                (horizontal_target(&rendered, location, motion, count), None)
             }
             Motion::Up | Motion::Down => {
-                let column = *self.preferred_column.get_or_insert(location.column);
-                vertical_target(&rendered, location, column, motion, count)
+                let column = self.preferred_column.unwrap_or(location.column);
+                (
+                    vertical_target(&rendered, location, column, motion, count),
+                    Some(column),
+                )
             }
             Motion::WordForward | Motion::WordBackward => {
-                self.preferred_column = None;
-                word_target(&self.document, cursor, motion, count)
+                (word_target(&self.document, cursor, motion, count), None)
             }
             Motion::RowStart | Motion::FirstNonBlank => {
-                self.preferred_column = None;
                 let row = location
                     .row
                     .saturating_add(count.saturating_sub(1))
                     .min(rendered.rows().len().saturating_sub(1));
-                rendered.rows()[row]
+                let target = rendered.rows()[row]
                     .cells()
                     .iter()
                     .find(|cell| cell.is_navigable())
-                    .map(|cell| cell.position())
+                    .map(|cell| cell.position());
+                (target, None)
             }
             Motion::RowEnd => {
-                self.preferred_column = None;
                 let row = location
                     .row
                     .saturating_add(count.saturating_sub(1))
                     .min(rendered.rows().len().saturating_sub(1));
-                rendered.rows()[row]
+                let target = rendered.rows()[row]
                     .cells()
                     .iter()
                     .rev()
                     .find(|cell| cell.is_navigable())
-                    .map(|cell| cell.position())
+                    .map(|cell| cell.position());
+                (target, None)
             }
             Motion::ParagraphBackward | Motion::ParagraphForward => {
-                self.preferred_column = None;
-                paragraph_target(&rendered, cursor, motion, count)
+                (paragraph_target(&rendered, cursor, motion, count), None)
             }
         };
 
+        drop(rendered);
+        self.preferred_column = preferred_column;
         if let Some(target) = target {
             self.cursor = Some(target);
             self.ensure_horizontal_cursor_visible(width, target);
         }
         let height = self.height_after_cursor_change(height, had_status);
-        let rendered = self.rendered(width);
-        self.ensure_cursor_visible(&rendered, height);
+        self.ensure_cursor_visible(width, height);
         self.ensure_outline_context_visible(height);
     }
 
     fn document_row(&mut self, width: u16, height: u16, count: Option<usize>, end: bool) {
         let had_status = self.status_text().is_some();
-        let rendered = self.rendered(width);
         self.preferred_column = None;
-        self.cursor = match count {
+        let rendered = self.rendered(width);
+        let cursor = match count {
             Some(count) if count > 0 && (end || count > 1) => rendered
                 .rows()
                 .get(count.saturating_sub(1))
@@ -1208,38 +1230,47 @@ impl ReadingSession {
             _ if end => rendered.last_position(),
             _ => rendered.first_position(),
         };
+        drop(rendered);
+        self.cursor = cursor;
         let height = self.height_after_cursor_change(height, had_status);
         if let Some(cursor) = self.cursor {
             self.ensure_horizontal_cursor_visible(width, cursor);
         }
-        let rendered = self.rendered(width);
-        self.ensure_cursor_visible(&rendered, height);
+        self.ensure_cursor_visible(width, height);
         self.ensure_outline_context_visible(height);
     }
 
-    fn scroll(&mut self, rendered: &RenderedDocument, height: u16, amount: isize) {
-        let maximum = rendered
-            .rows()
-            .len()
-            .saturating_sub(usize::from(height.max(1)));
+    fn scroll(&mut self, width: u16, height: u16, amount: isize) {
+        let maximum = {
+            let rendered = self.rendered(width);
+            rendered
+                .rows()
+                .len()
+                .saturating_sub(usize::from(height.max(1)))
+        };
         self.viewport = self.viewport.saturating_add_signed(amount).min(maximum);
     }
 
-    fn ensure_cursor_visible(&mut self, rendered: &RenderedDocument, height: u16) {
+    fn ensure_cursor_visible(&mut self, width: u16, height: u16) {
+        let rendered = self.rendered(width);
         let height = usize::from(height.max(1));
         let maximum = rendered.rows().len().saturating_sub(height);
-        self.viewport = self.viewport.min(maximum);
+        let mut viewport = self.viewport.min(maximum);
         let Some(row) = self
             .cursor
             .and_then(|cursor| rendered.row_for_position(cursor))
         else {
+            drop(rendered);
+            self.viewport = viewport;
             return;
         };
-        if row < self.viewport {
-            self.viewport = row;
-        } else if row >= self.viewport + height {
-            self.viewport = row + 1 - height;
+        if row < viewport {
+            viewport = row;
+        } else if row >= viewport + height {
+            viewport = row + 1 - height;
         }
+        drop(rendered);
+        self.viewport = viewport;
     }
 
     fn ensure_horizontal_cursor_visible(&mut self, width: u16, cursor: SemanticPosition) {
@@ -1251,8 +1282,8 @@ impl ReadingSession {
         }
 
         let width = self.pane_layout(width).document_width;
-        let rendered = layout(&self.document, width);
-        let Some(location) = rendered.cell_for_position(cursor) else {
+        let rendered = self.rendered(width);
+        let Some(location) = rendered.unclipped_cell_for_position(cursor) else {
             return;
         };
         let row = &rendered.rows()[location.row];
@@ -1261,11 +1292,12 @@ impl ReadingSession {
             .max(1);
         let cell_start = location.column.saturating_sub(row.column());
         let cell_end = cell_start + location.width;
-        let offset = &mut self.horizontal_offsets[cursor.block];
+        let old_offset = self.horizontal_offsets[cursor.block];
+        let mut new_offset = old_offset;
 
-        if cell_start < *offset {
-            *offset = cell_start;
-        } else if cell_end > offset.saturating_add(available_width) {
+        if cell_start < new_offset {
+            new_offset = cell_start;
+        } else if cell_end > new_offset.saturating_add(available_width) {
             let minimum_offset = cell_end.saturating_sub(available_width);
             let mut boundary = 0;
             for cell in row.cells() {
@@ -1274,7 +1306,14 @@ impl ReadingSession {
                 }
                 boundary += cell.width();
             }
-            *offset = boundary.min(cell_start);
+            new_offset = boundary.min(cell_start);
+        }
+        if new_offset != old_offset {
+            drop(rendered);
+            self.horizontal_offsets[cursor.block] = new_offset;
+            self.layout_cache
+                .borrow_mut()
+                .invalidate_block(cursor.block);
         }
     }
 
@@ -1319,8 +1358,7 @@ impl ReadingSession {
             }
             _ => {}
         }
-        let rendered = self.rendered(width);
-        self.ensure_cursor_visible(&rendered, self.content_height(screen_height));
+        self.ensure_cursor_visible(width, self.content_height(screen_height));
         self.ensure_outline_context_visible(self.content_height(screen_height));
     }
 
@@ -1349,8 +1387,7 @@ impl ReadingSession {
             .collect();
         if self.search_matches.is_empty() {
             self.search_message = Some(format!("Pattern not found: {}", prompt.query));
-            let rendered = self.rendered(width);
-            self.ensure_cursor_visible(&rendered, self.content_height(screen_height));
+            self.ensure_cursor_visible(width, self.content_height(screen_height));
             return;
         }
 
@@ -1489,7 +1526,7 @@ impl ReadingSession {
 
 impl ReloadContext {
     fn capture(session: &ReadingSession) -> Self {
-        let document_positions = logical_positions(&session.document);
+        let document_positions = &session.logical_positions;
         let section_index = session.current_section().and_then(|section| {
             session
                 .outline
@@ -1508,14 +1545,14 @@ impl ReloadContext {
             })
             .unwrap_or_default();
         let section_positions = section_index
-            .map(|index| positions_in_section(&document_positions, &session.outline, index))
+            .map(|index| positions_in_section(document_positions, &session.outline, index))
             .unwrap_or_default();
 
         Self {
             heading_path,
             heading_path_occurrence,
             section_anchor: RelativeAnchor::capture(&section_positions, session.cursor),
-            document_anchor: RelativeAnchor::capture(&document_positions, session.cursor),
+            document_anchor: RelativeAnchor::capture(document_positions, session.cursor),
         }
     }
 
@@ -1523,8 +1560,8 @@ impl ReloadContext {
         &self,
         document: &Document,
         outline: &[OutlineEntry],
+        document_positions: &[SemanticPosition],
     ) -> Option<SemanticPosition> {
-        let document_positions = logical_positions(document);
         if let Some(path) = &self.heading_path {
             let heading_paths = heading_paths(outline);
             let section = heading_paths
@@ -1534,7 +1571,7 @@ impl ReloadContext {
                 .nth(self.heading_path_occurrence)
                 .map(|(index, _)| index);
             if let Some(section) = section {
-                let positions = positions_in_section(&document_positions, outline, section);
+                let positions = positions_in_section(document_positions, outline, section);
                 if let Some(position) = self.section_anchor.restore(&positions) {
                     return Some(position);
                 }
@@ -1542,7 +1579,7 @@ impl ReloadContext {
         }
 
         self.document_anchor
-            .restore(&document_positions)
+            .restore(document_positions)
             .or_else(|| layout(document, 100).first_position())
     }
 }
@@ -2284,6 +2321,15 @@ impl Harness {
         self.draw();
     }
 
+    pub fn reset_layout_metrics(&mut self) {
+        self.session.layout_cache.borrow_mut().reset_metrics();
+    }
+
+    #[must_use]
+    pub fn layout_metrics(&self) -> LayoutMetrics {
+        self.session.layout_cache.borrow().metrics()
+    }
+
     pub fn keys(&mut self, keys: &str) {
         for character in keys.chars() {
             self.key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
@@ -2446,14 +2492,7 @@ impl Harness {
 
     #[must_use]
     pub fn highlight_at(&self, position: SemanticPosition) -> Option<crate::HighlightStyle> {
-        let area = self.terminal.backend().buffer().area;
-        self.session
-            .rendered(area.width)
-            .rows()
-            .iter()
-            .flat_map(|row| row.cells())
-            .find(|cell| cell.position() == position)
-            .and_then(|cell| cell.style().highlight())
+        self.session.code_highlight(position)
     }
 
     pub fn settle_highlighting(&mut self) {

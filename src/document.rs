@@ -6,6 +6,8 @@ use pulldown_cmark::{
 };
 
 const OBJECT_REPLACEMENT_CHARACTER: &str = "\u{fffc}";
+const V1_DOCUMENT_BYTES: usize = 10 * 1024 * 1024;
+const V1_DOCUMENT_LINES: usize = 100_000;
 
 /// An owned, width-independent representation of a Markdown Document.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -18,6 +20,7 @@ pub struct Document {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DocumentWarning {
     InvalidUtf8Replaced,
+    LargeDocument,
 }
 
 impl DocumentWarning {
@@ -25,6 +28,9 @@ impl DocumentWarning {
     pub fn message(self) -> &'static str {
         match self {
             Self::InvalidUtf8Replaced => "warning: invalid UTF-8 replaced with �",
+            Self::LargeDocument => {
+                "warning: Document exceeds the 10 MiB or 100,000-line v1 design scale"
+            }
         }
     }
 }
@@ -660,10 +666,12 @@ impl Document {
         }
 
         finish_builder(&mut builder, &mut blocks);
-        Self {
-            blocks,
-            warnings: Vec::new(),
-        }
+        let warnings = (markdown.len() > V1_DOCUMENT_BYTES
+            || markdown.lines().count() > V1_DOCUMENT_LINES)
+            .then_some(DocumentWarning::LargeDocument)
+            .into_iter()
+            .collect();
+        Self { blocks, warnings }
     }
 
     #[must_use]

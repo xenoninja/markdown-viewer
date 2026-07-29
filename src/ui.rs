@@ -56,6 +56,11 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
             }
             spans.extend(row.visible_cells().map(|cell| {
                 let mut style = cell_style(cell.style(), alert, color_enabled);
+                style = apply_code_highlight(
+                    style,
+                    session.code_highlight(cell.position()),
+                    color_enabled,
+                );
                 if session.is_search_match(cell.position()) {
                     style = style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
                     if color_enabled {
@@ -244,7 +249,15 @@ fn cell_style(semantic: layout::CellStyle, alert: Option<AlertKind>, color_enabl
             style = style.fg(alert_color(alert));
         }
     }
-    if let Some(highlight) = semantic.highlight() {
+    style
+}
+
+fn apply_code_highlight(
+    mut style: Style,
+    highlight: Option<crate::HighlightStyle>,
+    color_enabled: bool,
+) -> Style {
+    if let Some(highlight) = highlight {
         if highlight.is_bold() {
             style = style.add_modifier(Modifier::BOLD);
         }

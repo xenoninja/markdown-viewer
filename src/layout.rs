@@ -1,15 +1,188 @@
-use std::collections::HashMap;
-
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::highlight::HighlightStyle;
 use crate::{
     AlertKind, Block, BlockKind, Document, HeadingLevel, Image, InlineStyle, ListMarker,
     TableAlignment, TableCell,
 };
 
 const MAX_PROSE_WIDTH: usize = 100;
+
+/// Observable layout work used by performance-focused application tests.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LayoutMetrics {
+    blocks_laid_out: usize,
+    documents_assembled: usize,
+}
+
+impl LayoutMetrics {
+    #[must_use]
+    pub fn blocks_laid_out(self) -> usize {
+        self.blocks_laid_out
+    }
+
+    #[must_use]
+    pub fn documents_assembled(self) -> usize {
+        self.documents_assembled
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CachedBlockLayout {
+    width: u16,
+    horizontal_offset: usize,
+    rows: Vec<RenderedRow>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedDocumentLayout {
+    width: u16,
+    rendered: RenderedDocument,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct LayoutCache {
+    blocks: Vec<Option<CachedBlockLayout>>,
+    document: Option<CachedDocumentLayout>,
+    dirty_blocks: Vec<usize>,
+    metrics: LayoutMetrics,
+}
+
+impl LayoutCache {
+    pub(crate) fn prepare(
+        &mut self,
+        document: &Document,
+        width: u16,
+        horizontal_offsets: &[usize],
+    ) {
+        if self
+            .document
+            .as_ref()
+            .is_some_and(|cached| cached.width == width)
+        {
+            self.patch_dirty_blocks(document, horizontal_offsets);
+            return;
+        }
+
+        self.dirty_blocks.clear();
+        self.blocks.resize_with(document.blocks().len(), || None);
+        self.blocks.truncate(document.blocks().len());
+        let pane_width = usize::from(width.max(1));
+        let mut rows = Vec::new();
+        for (block_index, block, horizontal_offset) in
+            blocks_with_offsets(document, horizontal_offsets)
+        {
+            let reusable = self.blocks[block_index].as_ref().is_some_and(|cached| {
+                cached.width == width && cached.horizontal_offset == horizontal_offset
+            });
+            if !reusable {
+                self.layout_and_cache_block(block, block_index, width, horizontal_offset);
+            }
+            rows.extend(
+                self.blocks[block_index]
+                    .as_ref()
+                    .expect("block layout is cached")
+                    .rows
+                    .iter()
+                    .cloned(),
+            );
+        }
+
+        let rendered = RenderedDocument {
+            rows,
+            content_width: pane_width.min(MAX_PROSE_WIDTH),
+        };
+        self.metrics.documents_assembled += 1;
+        self.document = Some(CachedDocumentLayout { width, rendered });
+    }
+
+    fn patch_dirty_blocks(&mut self, document: &Document, horizontal_offsets: &[usize]) {
+        let dirty_blocks = std::mem::take(&mut self.dirty_blocks);
+        for block_index in dirty_blocks {
+            let Some(block) = document.blocks().get(block_index) else {
+                continue;
+            };
+            let horizontal_offset = horizontal_offsets
+                .get(block_index)
+                .copied()
+                .unwrap_or_default();
+            let width = self
+                .document
+                .as_ref()
+                .expect("dirty blocks require a cached document")
+                .width;
+            let rows = self.layout_and_cache_block(block, block_index, width, horizontal_offset);
+            let rendered = &mut self
+                .document
+                .as_mut()
+                .expect("dirty blocks require a cached document")
+                .rendered;
+            let first = rendered
+                .rows
+                .partition_point(|row| row.block() < block_index);
+            let last = rendered
+                .rows
+                .partition_point(|row| row.block() <= block_index);
+            rendered.rows.splice(first..last, rows);
+        }
+    }
+
+    fn layout_and_cache_block(
+        &mut self,
+        block: &Block,
+        block_index: usize,
+        width: u16,
+        horizontal_offset: usize,
+    ) -> Vec<RenderedRow> {
+        let rows = layout_block(
+            block,
+            block_index,
+            usize::from(width.max(1)),
+            horizontal_offset,
+        );
+        self.blocks[block_index] = Some(CachedBlockLayout {
+            width,
+            horizontal_offset,
+            rows: rows.clone(),
+        });
+        self.metrics.blocks_laid_out += 1;
+        rows
+    }
+
+    pub(crate) fn invalidate_block(&mut self, block: usize) {
+        if !self.dirty_blocks.contains(&block) {
+            self.dirty_blocks.push(block);
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.blocks.clear();
+        self.document = None;
+        self.dirty_blocks.clear();
+    }
+
+    pub(crate) fn metrics(&self) -> LayoutMetrics {
+        self.metrics
+    }
+
+    pub(crate) fn is_prepared(&self, width: u16) -> bool {
+        self.document
+            .as_ref()
+            .is_some_and(|cached| cached.width == width && self.dirty_blocks.is_empty())
+    }
+
+    pub(crate) fn document(&self) -> &RenderedDocument {
+        &self
+            .document
+            .as_ref()
+            .expect("layout is prepared before rendering")
+            .rendered
+    }
+
+    pub(crate) fn reset_metrics(&mut self) {
+        self.metrics = LayoutMetrics::default();
+    }
+}
 
 #[derive(Clone, Copy)]
 struct TableColumnWidth {
@@ -54,7 +227,6 @@ pub struct CellStyle {
     inline: InlineStyle,
     link: bool,
     code: bool,
-    highlight: Option<HighlightStyle>,
     thematic_break: bool,
     table_header: bool,
 }
@@ -96,11 +268,6 @@ impl CellStyle {
     }
 
     #[must_use]
-    pub fn highlight(self) -> Option<HighlightStyle> {
-        self.highlight
-    }
-
-    #[must_use]
     pub fn is_thematic_break(self) -> bool {
         self.thematic_break
     }
@@ -119,15 +286,9 @@ impl CellStyle {
             inline,
             link,
             code: kind == BlockKind::Code,
-            highlight: None,
             thematic_break: kind == BlockKind::ThematicBreak,
             table_header: false,
         }
-    }
-
-    fn with_highlight(mut self, highlight: Option<HighlightStyle>) -> Self {
-        self.highlight = highlight;
-        self
     }
 
     fn with_table_header(mut self, table_header: bool) -> Self {
@@ -325,6 +486,25 @@ impl RenderedDocument {
     }
 
     #[must_use]
+    pub(crate) fn unclipped_cell_for_position(
+        &self,
+        position: SemanticPosition,
+    ) -> Option<CellLocation> {
+        self.rows.iter().enumerate().find_map(|(row_index, row)| {
+            row.projected_cells()
+                .find(|projection| {
+                    projection.cell.is_navigable() && projection.cell.position == position
+                })
+                .map(|projection| CellLocation {
+                    row: row_index,
+                    column: row.column + projection.content_column,
+                    width: projection.cell.width,
+                    position,
+                })
+        })
+    }
+
+    #[must_use]
     pub fn position_at(&self, row: usize, column: usize) -> Option<SemanticPosition> {
         let row = self.rows.get(row)?;
         for projection in row.projected_cells() {
@@ -394,18 +574,48 @@ pub fn layout(document: &Document, width: u16) -> RenderedDocument {
 }
 
 pub(crate) fn logical_positions(document: &Document) -> Vec<SemanticPosition> {
-    layout(document, MAX_PROSE_WIDTH as u16)
-        .rows()
-        .iter()
-        .flat_map(|row| row.cells())
-        .filter(|cell| cell.is_navigable())
-        .map(RenderedCell::position)
-        .fold(Vec::new(), |mut positions, position| {
-            if positions.last() != Some(&position) {
-                positions.push(position);
+    let mut positions = Vec::new();
+    for (block_index, block) in document.blocks().iter().enumerate() {
+        if matches!(block.kind(), BlockKind::ThematicBreak | BlockKind::Empty) {
+            positions.push(SemanticPosition {
+                block: block_index,
+                grapheme: 0,
+            });
+        } else if let Some(table) = block.table() {
+            for cell in table.rows().iter().flat_map(|row| row.cells()) {
+                logical_span_positions(
+                    block_index,
+                    cell.grapheme_offset(),
+                    cell.spans(),
+                    &mut positions,
+                );
             }
-            positions
-        })
+        } else {
+            logical_span_positions(block_index, 0, block.spans(), &mut positions);
+        }
+    }
+    positions
+}
+
+fn logical_span_positions(
+    block: usize,
+    mut grapheme: usize,
+    spans: &[crate::InlineSpan],
+    positions: &mut Vec<SemanticPosition>,
+) {
+    for span in spans {
+        if span.image().is_some() {
+            positions.push(SemanticPosition { block, grapheme });
+            grapheme += 1;
+            continue;
+        }
+        for symbol in span.text().graphemes(true) {
+            if symbol != "\n" && !symbol.chars().all(char::is_whitespace) {
+                positions.push(SemanticPosition { block, grapheme });
+            }
+            grapheme += 1;
+        }
+    }
 }
 
 pub(crate) fn layout_with_offsets(
@@ -413,53 +623,76 @@ pub(crate) fn layout_with_offsets(
     width: u16,
     horizontal_offsets: &[usize],
 ) -> RenderedDocument {
-    layout_with_state(document, width, horizontal_offsets, &HashMap::new())
-}
-
-pub(crate) fn layout_with_state(
-    document: &Document,
-    width: u16,
-    horizontal_offsets: &[usize],
-    highlights: &HashMap<usize, Vec<HighlightStyle>>,
-) -> RenderedDocument {
     let pane_width = usize::from(width.max(1));
-    let content_width = pane_width.min(MAX_PROSE_WIDTH);
-    let base_column = pane_width.saturating_sub(content_width) / 2;
     let mut rows = Vec::new();
 
-    for (block_index, block) in document.blocks().iter().enumerate() {
-        let leading = block_leading(block);
-        let leading_width = UnicodeWidthStr::width(leading.as_str());
-        if matches!(block.kind(), BlockKind::Code | BlockKind::FrontMatter) {
-            layout_code(
-                block,
+    for (block_index, block, horizontal_offset) in blocks_with_offsets(document, horizontal_offsets)
+    {
+        rows.extend(layout_block(
+            block,
+            block_index,
+            pane_width,
+            horizontal_offset,
+        ));
+    }
+
+    RenderedDocument {
+        rows,
+        content_width: pane_width.min(MAX_PROSE_WIDTH),
+    }
+}
+
+fn blocks_with_offsets<'a>(
+    document: &'a Document,
+    horizontal_offsets: &'a [usize],
+) -> impl Iterator<Item = (usize, &'a Block, usize)> + 'a {
+    document
+        .blocks()
+        .iter()
+        .enumerate()
+        .map(|(block_index, block)| {
+            (
                 block_index,
-                leading_width,
-                &leading,
+                block,
                 horizontal_offsets
                     .get(block_index)
                     .copied()
                     .unwrap_or_default(),
-                highlights.get(&block_index).map(Vec::as_slice),
-                &mut rows,
-            );
-            continue;
-        }
-        if block.kind() == BlockKind::Table {
-            layout_table(
-                block,
-                block_index,
-                pane_width.saturating_sub(leading_width).max(1),
-                leading_width,
-                &leading,
-                horizontal_offsets
-                    .get(block_index)
-                    .copied()
-                    .unwrap_or_default(),
-                &mut rows,
-            );
-            continue;
-        }
+            )
+        })
+}
+
+fn layout_block(
+    block: &Block,
+    block_index: usize,
+    pane_width: usize,
+    horizontal_offset: usize,
+) -> Vec<RenderedRow> {
+    let content_width = pane_width.min(MAX_PROSE_WIDTH);
+    let base_column = pane_width.saturating_sub(content_width) / 2;
+    let leading = block_leading(block);
+    let leading_width = UnicodeWidthStr::width(leading.as_str());
+    let mut rows = Vec::new();
+    if matches!(block.kind(), BlockKind::Code | BlockKind::FrontMatter) {
+        layout_code(
+            block,
+            block_index,
+            leading_width,
+            &leading,
+            horizontal_offset,
+            &mut rows,
+        );
+    } else if block.kind() == BlockKind::Table {
+        layout_table(
+            block,
+            block_index,
+            pane_width.saturating_sub(leading_width).max(1),
+            leading_width,
+            &leading,
+            horizontal_offset,
+            &mut rows,
+        );
+    } else {
         let block_width = content_width.saturating_sub(leading_width).max(1);
         if block.kind() == BlockKind::ThematicBreak {
             layout_thematic_break(
@@ -471,20 +704,14 @@ pub(crate) fn layout_with_state(
                 leading,
                 &mut rows,
             );
-            continue;
-        }
-        if block.kind() == BlockKind::Empty {
+        } else if block.kind() == BlockKind::Empty {
             layout_empty_list_item(block, block_index, base_column, &mut rows);
-            continue;
+        } else {
+            let column = base_column + leading_width;
+            wrap_block(block, block_index, block_width, column, &leading, &mut rows);
         }
-        let column = base_column + leading_width;
-        wrap_block(block, block_index, block_width, column, &leading, &mut rows);
     }
-
-    RenderedDocument {
-        rows,
-        content_width,
-    }
+    rows
 }
 
 fn layout_code(
@@ -493,7 +720,6 @@ fn layout_code(
     column: usize,
     leading: &str,
     horizontal_offset: usize,
-    highlights: Option<&[HighlightStyle]>,
     rows: &mut Vec<RenderedRow>,
 ) {
     let first_code_row = rows.len();
@@ -537,9 +763,7 @@ fn layout_code(
                 symbol: display_symbol,
                 position,
                 width,
-                style: style.with_highlight(
-                    highlights.and_then(|styles| styles.get(position.grapheme).copied()),
-                ),
+                style,
                 link_target: None,
                 decorative: false,
             });
