@@ -7,7 +7,7 @@ source-code pager.
 
 ## Install
 
-`mdview` v1 supports stable Rust 1.88 or newer on macOS and Linux:
+`mdview` supports stable Rust on macOS and Linux:
 
 ```console
 cargo install mdview
@@ -124,22 +124,22 @@ On Linux it tries `wl-copy`, `xclip`, then `xsel`. If native integration is
 unavailable, it tries OSC 52 through the terminal. The status bar reports
 success or failure; terminal policy can still block OSC 52.
 
-## Platform, safety, and v1 boundary
+## Platform, safety, and boundaries
 
-macOS and Linux terminals are the supported v1 platforms. Native Windows
-behavior is best-effort and is not guaranteed. Set `NO_COLOR` to disable color;
-the semantic layout remains usable in monochrome. Terminals smaller than
-40 columns by 10 rows show a recoverable resize message.
+macOS and Linux terminals are supported. Native Windows behavior is best-effort
+and is not guaranteed. Set `NO_COLOR` to disable color; the semantic layout
+remains usable in monochrome. Terminals smaller than 40 columns by 10 rows show
+a recoverable resize message.
 
 Document content is inert. Control characters are replaced or visibly escaped,
 raw HTML is not executed, and referenced images, styles, includes, and links are
 never fetched automatically. Only an explicit `gx` on an `http` or `https` link
 may launch the system browser. Relative Document links remain display-only.
-Inputs above the v1 design scale of about 10 MiB or 100,000 lines are attempted
-with a warning rather than rejected.
+Inputs above the design scale of about 10 MiB or 100,000 lines are attempted with
+a warning rather than rejected.
 
-Version 1 deliberately has no configuration system, source mode, mouse capture,
+`mdview` deliberately has no configuration system, source mode, mouse capture,
 network fetcher, multi-Document Reading Session, Windows support guarantee,
 prebuilt binary, package-manager formula, shell completion, or man page. The
 crate contains an internal library to support the executable and its tests, but
-v1 does not promise a stable public Rust library API.
+does not promise a stable public Rust library API.
