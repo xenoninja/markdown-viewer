@@ -1,4 +1,6 @@
 mod app;
+mod clipboard;
+mod copy;
 mod document;
 mod highlight;
 mod layout;
@@ -7,7 +9,12 @@ mod source;
 mod terminal;
 mod ui;
 
-pub use app::{Command, Harness, PaneFocus, ReadingSession};
+pub use app::{Command, Effect, Harness, PaneFocus, ReadingSession};
+pub use clipboard::{
+    ClipboardAdapter, ClipboardMethod, ClipboardResult, ClipboardWriter, FakeClipboard,
+    SystemClipboard, encode_osc52,
+};
+pub use copy::SelectionMode;
 pub use document::{
     AlertKind, Block, BlockKind, Document, DocumentWarning, HeadingLevel, Image, InlineSpan,
     InlineStyle, ListItem, ListMarker, Table, TableAlignment, TableCell, TableRow,

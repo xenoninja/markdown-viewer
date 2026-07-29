@@ -170,6 +170,11 @@ impl RenderedCell {
     pub fn is_navigable(&self) -> bool {
         !self.decorative && !self.symbol.chars().all(char::is_whitespace)
     }
+
+    #[must_use]
+    pub fn is_decorative(&self) -> bool {
+        self.decorative
+    }
 }
 
 /// A rendered row whose cells retain their semantic cursor mappings.

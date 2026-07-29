@@ -8,6 +8,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::clipboard::{ClipboardResult, ClipboardWriter, FakeClipboard};
+use crate::copy::{self, SelectionMode};
 use crate::highlight::{CodeHighlighter, HighlightCache};
 use crate::layout::{CellLocation, RenderedDocument, SemanticPosition, layout, layout_with_state};
 use crate::search::{SearchMatch, find_matches};
@@ -29,6 +31,18 @@ pub enum Command {
 pub enum PaneFocus {
     Document,
     Outline,
+}
+
+/// Explicit side-effect requests observed by adapters and tests.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Effect {
+    WriteClipboard(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Selection {
+    mode: SelectionMode,
+    anchor: SemanticPosition,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -117,6 +131,9 @@ pub struct ReadingSession {
     search_leading_highlights: BTreeSet<usize>,
     search_query: Option<String>,
     search_message: Option<String>,
+    selection: Option<Selection>,
+    status_message: Option<String>,
+    effects: Vec<Effect>,
     quit: bool,
     highlighting: HighlightCache,
 }
@@ -168,6 +185,9 @@ impl ReadingSession {
             search_leading_highlights: BTreeSet::new(),
             search_query: None,
             search_message: None,
+            selection: None,
+            status_message: None,
+            effects: Vec::new(),
             quit: false,
             highlighting,
         }
@@ -187,6 +207,10 @@ impl ReadingSession {
 
         let height = self.content_height(screen_height);
         if key.code == KeyCode::Esc {
+            if self.selection.take().is_some() {
+                self.clear_pending();
+                return;
+            }
             self.focus = PaneFocus::Document;
             self.ensure_outline_context_visible(self.content_height(screen_height));
             self.clear_pending();
@@ -305,6 +329,15 @@ impl ReadingSession {
 
         match character {
             'q' => self.command(Command::Quit),
+            'v' if self.focus == PaneFocus::Document => {
+                self.begin_selection(SelectionMode::Characterwise);
+            }
+            'V' if self.focus == PaneFocus::Document => {
+                self.begin_selection(SelectionMode::Row);
+            }
+            'y' if self.focus == PaneFocus::Document && self.selection.is_some() => {
+                self.yank_selection(width);
+            }
             'h' => self.motion(width, height, Motion::Left, count),
             'j' => self.motion(width, height, Motion::Down, count),
             'k' => self.motion(width, height, Motion::Up, count),
@@ -320,6 +353,78 @@ impl ReadingSession {
             'N' => self.navigate_search(false, width, height),
             _ => self.clear_pending(),
         }
+    }
+
+    fn begin_selection(&mut self, mode: SelectionMode) {
+        let Some(anchor) = self.cursor else {
+            return;
+        };
+        self.selection = Some(Selection { mode, anchor });
+        self.status_message = None;
+        self.clear_pending();
+    }
+
+    fn yank_selection(&mut self, width: u16) {
+        let Some(selection) = self.selection.take() else {
+            return;
+        };
+        let Some(cursor) = self.cursor else {
+            return;
+        };
+        let rendered = self.rendered(width);
+        let text = copy::selected_text(
+            &self.document,
+            &rendered,
+            selection.mode,
+            selection.anchor,
+            cursor,
+        );
+        self.effects.push(Effect::WriteClipboard(text));
+        self.clear_pending();
+    }
+
+    pub fn report_clipboard_result(&mut self, result: ClipboardResult) {
+        self.status_message = Some(match result {
+            ClipboardResult::Copied(_) => "Copied".to_owned(),
+            ClipboardResult::Failed(message) => {
+                if message.is_empty() {
+                    "Copy failed".to_owned()
+                } else {
+                    format!("Copy failed: {message}")
+                }
+            }
+        });
+    }
+
+    pub fn drain_effects(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.effects)
+    }
+
+    #[must_use]
+    pub fn selection_mode(&self) -> Option<SelectionMode> {
+        self.selection.map(|selection| selection.mode)
+    }
+
+    #[must_use]
+    pub fn selection_anchor(&self) -> Option<SemanticPosition> {
+        self.selection.map(|selection| selection.anchor)
+    }
+
+    #[must_use]
+    pub fn selection_contains(&self, position: SemanticPosition, width: u16) -> bool {
+        let Some(selection) = self.selection else {
+            return false;
+        };
+        let Some(cursor) = self.cursor else {
+            return false;
+        };
+        let rendered = self.rendered(width);
+        selection_contains(selection, cursor, position, &rendered)
+    }
+
+    #[must_use]
+    pub fn is_selected(&self, position: SemanticPosition, width: u16) -> bool {
+        self.selection_contains(position, width)
     }
 
     #[must_use]
@@ -429,6 +534,8 @@ impl ReadingSession {
     pub(crate) fn status_text(&self) -> Option<String> {
         if let Some(prompt) = &self.search_prompt {
             Some(format!("/{}", prompt.query))
+        } else if let Some(message) = &self.status_message {
+            Some(message.clone())
         } else if let Some(message) = &self.search_message {
             Some(message.clone())
         } else if self.focus == PaneFocus::Outline {
@@ -942,6 +1049,34 @@ impl ReadingSession {
     }
 }
 
+fn selection_contains(
+    selection: Selection,
+    cursor: SemanticPosition,
+    position: SemanticPosition,
+    rendered: &RenderedDocument,
+) -> bool {
+    match selection.mode {
+        SelectionMode::Characterwise => {
+            let (start, end) = copy::ordered_endpoints(selection.anchor, cursor);
+            position >= start && position <= end
+        }
+        SelectionMode::Row => {
+            let Some(anchor_row) = rendered.row_for_position(selection.anchor) else {
+                return false;
+            };
+            let Some(cursor_row) = rendered.row_for_position(cursor) else {
+                return false;
+            };
+            let Some(position_row) = rendered.row_for_position(position) else {
+                return false;
+            };
+            let start_row = anchor_row.min(cursor_row);
+            let end_row = anchor_row.max(cursor_row);
+            (start_row..=end_row).contains(&position_row)
+        }
+    }
+}
+
 fn outline_label(block: &crate::Block) -> String {
     block
         .spans()
@@ -1166,6 +1301,8 @@ fn paragraph_target(
 pub struct Harness {
     session: ReadingSession,
     terminal: Terminal<TestBackend>,
+    clipboard: FakeClipboard,
+    effect_log: Vec<Effect>,
 }
 
 impl Harness {
@@ -1195,9 +1332,34 @@ impl Harness {
         let backend = TestBackend::new(width, height);
         let terminal = Terminal::new(backend).expect("TestBackend is infallible");
         session.resize(width, height);
-        let mut harness = Self { session, terminal };
+        let mut harness = Self {
+            session,
+            terminal,
+            clipboard: FakeClipboard::succeeding(),
+            effect_log: Vec::new(),
+        };
         harness.draw();
         harness
+    }
+
+    pub fn set_clipboard_result(&mut self, result: ClipboardResult) {
+        self.clipboard.result = result;
+    }
+
+    pub fn take_effects(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.effect_log)
+    }
+
+    fn apply_effects(&mut self) {
+        for effect in self.session.drain_effects() {
+            match &effect {
+                Effect::WriteClipboard(text) => {
+                    let result = self.clipboard.write_text(text);
+                    self.session.report_clipboard_result(result);
+                }
+            }
+            self.effect_log.push(effect);
+        }
     }
 
     pub fn open(path: impl AsRef<Path>, width: u16, height: u16) -> Result<Self, SourceError> {
@@ -1225,6 +1387,7 @@ impl Harness {
     pub fn key(&mut self, key: KeyEvent) {
         let area = self.terminal.backend().buffer().area;
         self.session.key(key, area.width, area.height);
+        self.apply_effects();
         self.draw();
     }
 
@@ -1260,6 +1423,27 @@ impl Harness {
     #[must_use]
     pub fn focus(&self) -> PaneFocus {
         self.session.focus()
+    }
+
+    #[must_use]
+    pub fn selection_mode(&self) -> Option<SelectionMode> {
+        self.session.selection_mode()
+    }
+
+    #[must_use]
+    pub fn selection_anchor(&self) -> Option<SemanticPosition> {
+        self.session.selection_anchor()
+    }
+
+    #[must_use]
+    pub fn selection_contains(&self, position: SemanticPosition) -> bool {
+        let width = self.terminal.backend().buffer().area.width;
+        self.session.selection_contains(position, width)
+    }
+
+    #[must_use]
+    pub fn document(&self) -> &Document {
+        self.session.document()
     }
 
     #[must_use]

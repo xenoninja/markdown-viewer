@@ -50,7 +50,10 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
                 if session.is_search_match(cell.position()) {
                     style = style.add_modifier(Modifier::UNDERLINED);
                 }
-                if cell.is_navigable() && Some(cell.position()) == cursor {
+                if cell.is_navigable()
+                    && (session.is_selected(cell.position(), frame.area().width)
+                        || Some(cell.position()) == cursor)
+                {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
                 Span::styled(cell.symbol().to_owned(), style)

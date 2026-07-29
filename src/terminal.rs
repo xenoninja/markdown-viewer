@@ -16,7 +16,8 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::Document;
-use crate::app::ReadingSession;
+use crate::app::{Effect, ReadingSession};
+use crate::clipboard::{ClipboardWriter, SystemClipboard};
 use crate::ui;
 
 pub fn run_reading_session(document: Document) -> io::Result<()> {
@@ -31,6 +32,7 @@ pub fn run_reading_session(document: Document) -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut session = ReadingSession::new(document);
+    let mut clipboard = SystemClipboard::with_osc52_writer(stdout());
     let initial_area = terminal.size()?;
     session.resize(initial_area.width, initial_area.height);
 
@@ -49,6 +51,7 @@ pub fn run_reading_session(document: Document) -> io::Result<()> {
             Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                 let area = terminal.size()?;
                 session.key(key, area.width, area.height);
+                apply_effects(&mut session, &mut clipboard);
             }
             Some(Event::Resize(width, height)) => session.resize(width, height),
             _ => {}
@@ -56,6 +59,17 @@ pub fn run_reading_session(document: Document) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+fn apply_effects(session: &mut ReadingSession, clipboard: &mut SystemClipboard) {
+    for effect in session.drain_effects() {
+        match effect {
+            Effect::WriteClipboard(text) => {
+                let result = clipboard.write_text(&text);
+                session.report_clipboard_result(result);
+            }
+        }
+    }
 }
 
 #[cfg(unix)]

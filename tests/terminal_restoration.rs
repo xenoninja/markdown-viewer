@@ -74,6 +74,13 @@ fn reading_session_enters_and_restores_the_terminal() {
     assert!(contains(&output, b"\x1b[?25l"), "cursor hidden");
     assert!(contains(&output, b"\x1b[?25h"), "cursor restored");
     assert!(
+        !contains(&output, b"\x1b[?1000h")
+            && !contains(&output, b"\x1b[?1002h")
+            && !contains(&output, b"\x1b[?1003h")
+            && !contains(&output, b"\x1b[?1006h"),
+        "mouse capture must stay disabled so native drag selection remains available; PTY output: {output:?}"
+    );
+    assert!(
         contains_rendered_text(&output, b"PTY") && contains_rendered_text(&output, b"paragraph"),
         "Document rendered; PTY output: {output:?}"
     );
