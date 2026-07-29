@@ -4,11 +4,13 @@ mod support;
 
 use std::fs::{self, File};
 use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use nix::libc;
 use nix::pty::{Winsize, openpty};
 use nix::sys::termios::{LocalFlags, tcgetattr};
 use nix::unistd::dup;
@@ -17,21 +19,76 @@ use tempfile::tempdir;
 
 #[test]
 fn reading_session_enters_and_restores_the_terminal() {
+    assert_session_restores(ExitAction::Keys(b"q"), false);
+}
+
+#[test]
+fn control_c_interrupt_restores_the_terminal() {
+    assert_session_restores(ExitAction::Keys(b"\x03"), false);
+}
+
+#[test]
+fn no_color_disables_terminal_color_enhancement() {
+    let color = assert_session_restores(ExitAction::Keys(b"q"), false);
+    let monochrome = assert_session_restores(ExitAction::Keys(b"q"), true);
+
+    assert!(contains_color_sgr(&color), "color output: {color:?}");
+    assert!(
+        !contains_color_sgr(&monochrome),
+        "NO_COLOR output: {monochrome:?}"
+    );
+}
+
+#[test]
+fn terminal_resize_event_recovers_the_normal_frame() {
+    let output = assert_session_restores(ExitAction::ResizeThenQuit, false);
+
+    assert!(
+        contains_rendered_text(&output, b"Terminal too small"),
+        "initial size warning: {output:?}"
+    );
+    assert!(
+        contains_rendered_text(&output, b"PTY") && contains_rendered_text(&output, b"paragraph"),
+        "resized Document frame: {output:?}"
+    );
+}
+
+#[derive(Clone, Copy)]
+enum ExitAction {
+    Keys(&'static [u8]),
+    ResizeThenQuit,
+}
+
+fn assert_session_restores(action: ExitAction, no_color: bool) -> Vec<u8> {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("document");
     fs::write(&path, "PTY paragraph").expect("write fixture");
 
     let size = Winsize {
-        ws_row: 12,
-        ws_col: 40,
+        ws_row: if matches!(action, ExitAction::ResizeThenQuit) {
+            9
+        } else {
+            12
+        },
+        ws_col: if matches!(action, ExitAction::ResizeThenQuit) {
+            39
+        } else {
+            40
+        },
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
     let pty = openpty(&size, None).expect("open PTY");
     let terminal_before = tcgetattr(&pty.slave).expect("read initial terminal mode");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mdview"))
-        .arg(&path)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mdview"));
+    command.arg(&path).env("TERM", "xterm-256color");
+    if no_color {
+        command.env("NO_COLOR", "1");
+    } else {
+        command.env_remove("NO_COLOR");
+    }
+    let mut child = command
         .stdin(Stdio::from(dup(&pty.slave).expect("duplicate PTY input")))
         .stdout(Stdio::from(dup(&pty.slave).expect("duplicate PTY output")))
         .stderr(Stdio::from(dup(&pty.slave).expect("duplicate PTY error")))
@@ -45,13 +102,46 @@ fn reading_session_enters_and_restores_the_terminal() {
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut output = Vec::new();
-    let mut sent_quit = false;
+    let mut action_finished = false;
+    let mut resized = false;
     let status = loop {
         read_available(&mut master, &mut output);
 
-        if !sent_quit && contains(&output, b"\x1b[?1049h") {
-            master.write_all(b"q").expect("send quit");
-            sent_quit = true;
+        match action {
+            ExitAction::Keys(keys) if !action_finished && contains(&output, b"\x1b[?1049h") => {
+                master.write_all(keys).expect("send exit input");
+                action_finished = true;
+            }
+            ExitAction::ResizeThenQuit
+                if !resized && contains_rendered_text(&output, b"Terminal too small") =>
+            {
+                let normal_size = Winsize {
+                    ws_row: 12,
+                    ws_col: 60,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                };
+                // SAFETY: master is a valid PTY descriptor and normal_size is initialized.
+                assert_eq!(
+                    unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &normal_size) },
+                    0,
+                    "resize PTY"
+                );
+                // SAFETY: the child process is live and SIGWINCH has its standard meaning.
+                assert_eq!(
+                    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGWINCH) },
+                    0,
+                    "deliver resize event"
+                );
+                resized = true;
+            }
+            ExitAction::ResizeThenQuit
+                if resized && !action_finished && contains_rendered_text(&output, b"paragraph") =>
+            {
+                master.write_all(b"q").expect("send quit after resize");
+                action_finished = true;
+            }
+            _ => {}
         }
 
         if let Some(status) = child.try_wait().expect("poll mdview") {
@@ -105,4 +195,38 @@ fn reading_session_enters_and_restores_the_terminal() {
         terminal_after.control_chars, terminal_before.control_chars,
         "control characters restored"
     );
+    output
+}
+
+fn contains_color_sgr(output: &[u8]) -> bool {
+    let mut index = 0;
+    while index + 2 < output.len() {
+        if output[index] != b'\x1b' || output[index + 1] != b'[' {
+            index += 1;
+            continue;
+        }
+        let parameters_start = index + 2;
+        let Some(end) = output[parameters_start..]
+            .iter()
+            .position(|byte| (0x40..=0x7e).contains(byte))
+            .map(|offset| parameters_start + offset)
+        else {
+            return false;
+        };
+        if output[end] == b'm'
+            && output[parameters_start..end]
+                .split(|byte| *byte == b';')
+                .filter_map(|parameter| std::str::from_utf8(parameter).ok()?.parse::<u16>().ok())
+                .any(|parameter| {
+                    matches!(
+                        parameter,
+                        30..=38 | 40..=48 | 90..=97 | 100..=107
+                    )
+                })
+        {
+            return true;
+        }
+        index = end + 1;
+    }
+    false
 }

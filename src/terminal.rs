@@ -1,4 +1,5 @@
 use std::io::{self, IsTerminal, stdin, stdout};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -136,7 +137,9 @@ fn connect_controlling_terminal_input() -> io::Result<()> {
     Ok(())
 }
 
-struct TerminalSession;
+struct TerminalSession {
+    _panic_hook: PanicHookGuard,
+}
 
 impl TerminalSession {
     fn enter() -> io::Result<Self> {
@@ -146,7 +149,9 @@ impl TerminalSession {
             let _ = disable_raw_mode();
             return Err(error);
         }
-        Ok(Self)
+        Ok(Self {
+            _panic_hook: PanicHookGuard::install(),
+        })
     }
 }
 
@@ -160,4 +165,162 @@ impl Drop for TerminalSession {
 fn restore_terminal() {
     let _ = execute!(stdout(), Show);
     let _ = execute!(stdout(), LeaveAlternateScreen);
+}
+
+struct PanicHookGuard {
+    previous: Option<Arc<PanicHook>>,
+}
+
+type PanicHook = dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static;
+
+impl PanicHookGuard {
+    fn install() -> Self {
+        let previous: Arc<PanicHook> = Arc::from(std::panic::take_hook());
+        let panic_previous = Arc::clone(&previous);
+        std::panic::set_hook(Box::new(move |panic| {
+            restore_terminal();
+            let _ = disable_raw_mode();
+            panic_previous(panic);
+        }));
+        Self {
+            previous: Some(previous),
+        }
+    }
+}
+
+impl Drop for PanicHookGuard {
+    fn drop(&mut self) {
+        if !std::thread::panicking()
+            && let Some(previous) = self.previous.take()
+        {
+            std::panic::set_hook(Box::new(move |panic| previous(panic)));
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs::File;
+    use std::io::{ErrorKind, Read};
+    use std::process::{Command, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
+    use nix::pty::{Winsize, openpty};
+    use nix::sys::termios::{LocalFlags, tcgetattr};
+    use nix::unistd::dup;
+
+    use super::TerminalSession;
+
+    const PROBE: &str = "MDVIEW_TERMINAL_RESTORATION_PROBE";
+
+    #[test]
+    fn error_and_panic_paths_restore_the_terminal() {
+        match std::env::var(PROBE).ok().as_deref() {
+            Some("panic") => {
+                let _session = TerminalSession::enter().expect("enter terminal");
+                panic!("intentional terminal panic");
+            }
+            Some("error") => {
+                let result = (|| -> std::io::Result<()> {
+                    let _session = TerminalSession::enter()?;
+                    Err(std::io::Error::other("intentional terminal error"))
+                })();
+                assert!(result.is_err());
+                std::process::exit(23);
+            }
+            _ => {
+                run_probe("error", false);
+                run_probe("panic", true);
+            }
+        }
+    }
+
+    fn run_probe(mode: &str, panic_output: bool) {
+        let size = Winsize {
+            ws_row: 12,
+            ws_col: 60,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let pty = openpty(&size, None).expect("open PTY");
+        let terminal_before = tcgetattr(&pty.slave).expect("read initial terminal mode");
+        let test_name = "terminal::tests::error_and_panic_paths_restore_the_terminal";
+        let mut child = Command::new(std::env::current_exe().expect("current test executable"))
+            .args(["--exact", test_name, "--nocapture"])
+            .env(PROBE, mode)
+            .stdin(Stdio::from(dup(&pty.slave).expect("duplicate PTY input")))
+            .stdout(Stdio::from(dup(&pty.slave).expect("duplicate PTY output")))
+            .stderr(Stdio::from(dup(&pty.slave).expect("duplicate PTY error")))
+            .spawn()
+            .expect("start terminal restoration probe");
+
+        let mut master = File::from(pty.master);
+        let flags =
+            OFlag::from_bits_truncate(fcntl(&master, FcntlArg::F_GETFL).expect("read PTY flags"));
+        fcntl(&master, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))
+            .expect("make PTY non-blocking");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        let status = loop {
+            read_available(&mut master, &mut output);
+            if let Some(status) = child.try_wait().expect("poll restoration probe") {
+                read_available(&mut master, &mut output);
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("stop timed-out restoration probe");
+                panic!("terminal restoration probe timed out: {output:?}");
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        let terminal_after = tcgetattr(&pty.slave).expect("read restored terminal mode");
+
+        assert!(!status.success(), "probe should use an error exit");
+        assert!(contains(&output, b"\x1b[?1049h"), "alternate screen entry");
+        assert!(contains(&output, b"\x1b[?1049l"), "alternate screen exit");
+        assert!(contains(&output, b"\x1b[?25l"), "cursor hidden");
+        assert!(contains(&output, b"\x1b[?25h"), "cursor restored");
+        if panic_output {
+            let restored = find(&output, b"\x1b[?1049l").expect("restoration position");
+            let panic = find(&output, b"intentional terminal panic").expect("panic output");
+            assert!(
+                restored < panic,
+                "panic hook must restore before printing the panic: {output:?}"
+            );
+        }
+        assert_eq!(terminal_after.input_flags, terminal_before.input_flags);
+        assert_eq!(terminal_after.output_flags, terminal_before.output_flags);
+        assert_eq!(terminal_after.control_flags, terminal_before.control_flags);
+        assert_eq!(
+            terminal_after.local_flags - LocalFlags::PENDIN,
+            terminal_before.local_flags - LocalFlags::PENDIN
+        );
+        assert_eq!(terminal_after.control_chars, terminal_before.control_chars);
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        find(haystack, needle).is_some()
+    }
+
+    fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    fn read_available(terminal: &mut File, output: &mut Vec<u8>) {
+        loop {
+            let mut chunk = [0_u8; 4096];
+            match terminal.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => output.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => break,
+                Err(error) => panic!("read PTY output: {error}"),
+            }
+        }
+    }
 }

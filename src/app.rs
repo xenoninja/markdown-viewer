@@ -7,6 +7,7 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::browser::{BrowserLauncher, BrowserResult, FakeBrowser};
 use crate::clipboard::{ClipboardResult, ClipboardWriter, FakeClipboard};
@@ -24,6 +25,58 @@ const MIN_OUTLINE_WIDTH: u16 = 16;
 const MAX_OUTLINE_WIDTH: u16 = 40;
 const MIN_DOCUMENT_PANE_WIDTH: u16 = 32;
 const PANE_DIVIDER_WIDTH: u16 = 1;
+pub(crate) const MIN_TERMINAL_WIDTH: u16 = 40;
+pub(crate) const MIN_TERMINAL_HEIGHT: u16 = 10;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ColorMode {
+    Color,
+    Monochrome,
+}
+
+impl ColorMode {
+    #[must_use]
+    pub fn detect() -> Self {
+        if std::env::var_os("NO_COLOR").is_some()
+            || std::env::var_os("TERM").is_some_and(|term| term == "dumb")
+        {
+            Self::Monochrome
+        } else {
+            Self::Color
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ViewerPresentation {
+    identity: String,
+    chrome: ViewerChrome,
+    color_mode: ColorMode,
+}
+
+impl ViewerPresentation {
+    fn viewer(identity: impl Into<String>, color_mode: ColorMode) -> Self {
+        Self {
+            identity: inert_label(&identity.into()),
+            chrome: ViewerChrome::Full,
+            color_mode,
+        }
+    }
+
+    fn content_only(identity: impl Into<String>, color_mode: ColorMode) -> Self {
+        Self {
+            identity: inert_label(&identity.into()),
+            chrome: ViewerChrome::ContentOnly,
+            color_mode,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ViewerChrome {
+    ContentOnly,
+    Full,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
@@ -34,6 +87,20 @@ pub enum Command {
 pub enum PaneFocus {
     Document,
     Outline,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StatusLevel {
+    Normal,
+    Success,
+    Warning,
+    Error,
+}
+
+#[derive(Debug)]
+struct StatusMessage {
+    text: String,
+    level: StatusLevel,
 }
 
 /// Explicit side-effect requests observed by adapters and tests.
@@ -131,6 +198,7 @@ struct RelativeAnchor {
 #[derive(Debug)]
 pub struct ReadingSession {
     source: Option<PathBuf>,
+    presentation: ViewerPresentation,
     document: Document,
     cursor: Option<SemanticPosition>,
     outline: Vec<OutlineEntry>,
@@ -153,7 +221,8 @@ pub struct ReadingSession {
     search_query: Option<String>,
     search_message: Option<String>,
     selection: Option<Selection>,
-    status_message: Option<String>,
+    status_message: Option<StatusMessage>,
+    help_open: bool,
     effects: Vec<Effect>,
     quit: bool,
     highlighting: HighlightCache,
@@ -162,16 +231,28 @@ pub struct ReadingSession {
 impl ReadingSession {
     #[must_use]
     pub fn new(document: Document) -> Self {
-        Self::with_highlight_cache(document, None, HighlightCache::syntect())
+        Self::with_highlight_cache(
+            document,
+            None,
+            ViewerPresentation::viewer("standard input", ColorMode::detect()),
+            HighlightCache::syntect(),
+        )
     }
 
     pub(crate) fn with_source(document: Document, source: PathBuf) -> Self {
-        Self::with_highlight_cache(document, Some(source), HighlightCache::syntect())
+        let identity = document_identity(&source);
+        Self::with_highlight_cache(
+            document,
+            Some(source),
+            ViewerPresentation::viewer(identity, ColorMode::detect()),
+            HighlightCache::syntect(),
+        )
     }
 
     fn with_highlight_cache(
         document: Document,
         source: Option<PathBuf>,
+        presentation: ViewerPresentation,
         highlighting: HighlightCache,
     ) -> Self {
         let cursor = layout(&document, 100).first_position();
@@ -181,6 +262,7 @@ impl ReadingSession {
         let block_count = document.blocks().len();
         Self {
             source,
+            presentation,
             document,
             cursor,
             outline,
@@ -204,6 +286,7 @@ impl ReadingSession {
             search_message: None,
             selection: None,
             status_message: None,
+            help_open: false,
             effects: Vec::new(),
             quit: false,
             highlighting,
@@ -217,11 +300,27 @@ impl ReadingSession {
     }
 
     pub fn key(&mut self, key: KeyEvent, width: u16, screen_height: u16) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.command(Command::Quit);
+            return;
+        }
+
+        if self.help_open {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?') => self.help_open = false,
+                KeyCode::Char('q') => self.command(Command::Quit),
+                _ => {}
+            }
+            self.clear_pending();
+            return;
+        }
+
         if self.search_prompt.is_some() {
             self.search_prompt_key(key, width, screen_height);
             return;
         }
 
+        self.status_message = None;
         let height = self.content_height(screen_height);
         if key.code == KeyCode::Esc {
             if self.selection.take().is_some() {
@@ -281,6 +380,12 @@ impl ReadingSession {
             self.clear_pending();
             return;
         };
+
+        if character == '?' {
+            self.help_open = true;
+            self.clear_pending();
+            return;
+        }
 
         if character == '/' {
             self.search_prompt = Some(SearchPrompt {
@@ -386,8 +491,10 @@ impl ReadingSession {
             self.effects.push(Effect::ReloadDocument(path.clone()));
             self.status_message = None;
         } else {
-            self.status_message =
-                Some("Reload unavailable: standard-input Documents cannot be reloaded".to_owned());
+            self.set_status(
+                "Reload unavailable: standard-input Documents cannot be reloaded",
+                StatusLevel::Warning,
+            );
         }
         self.clear_pending();
     }
@@ -426,14 +533,15 @@ impl ReadingSession {
                 self.search_message = None;
                 self.selection = None;
                 self.highlighting.reset();
-                self.status_message = Some(self.status_warning().map_or_else(
+                let message = self.status_warning().map_or_else(
                     || "Reloaded".to_owned(),
                     |warning| format!("Reloaded: {warning}"),
-                ));
+                );
+                self.set_status(message, StatusLevel::Success);
                 self.resize(width, screen_height);
             }
             Err(error) => {
-                self.status_message = Some(format!("Reload failed: {error}"));
+                self.set_status(format!("Reload failed: {error}"), StatusLevel::Error);
             }
         }
     }
@@ -467,16 +575,18 @@ impl ReadingSession {
     }
 
     pub fn report_clipboard_result(&mut self, result: ClipboardResult) {
-        self.status_message = Some(match result {
-            ClipboardResult::Copied(_) => "Copied".to_owned(),
-            ClipboardResult::Failed(message) => {
+        let (message, level) = match result {
+            ClipboardResult::Copied(_) => ("Copied".to_owned(), StatusLevel::Success),
+            ClipboardResult::Failed(message) => (
                 if message.is_empty() {
                     "Copy failed".to_owned()
                 } else {
                     format!("Copy failed: {message}")
-                }
-            }
-        });
+                },
+                StatusLevel::Error,
+            ),
+        };
+        self.set_status(message, level);
     }
 
     pub fn report_browser_result(&mut self, result: BrowserResult) {
@@ -485,11 +595,14 @@ impl ReadingSession {
                 self.status_message = None;
             }
             BrowserResult::Failed(message) => {
-                self.status_message = Some(if message.is_empty() {
-                    "Browser failed".to_owned()
-                } else {
-                    format!("Browser failed: {message}")
-                });
+                self.set_status(
+                    if message.is_empty() {
+                        "Browser failed".to_owned()
+                    } else {
+                        format!("Browser failed: {message}")
+                    },
+                    StatusLevel::Error,
+                );
             }
         }
     }
@@ -630,10 +743,13 @@ impl ReadingSession {
     }
 
     pub(crate) fn status_text(&self) -> Option<String> {
+        if self.viewer_chrome() {
+            return Some(self.viewer_status_text(u16::MAX));
+        }
         if let Some(prompt) = &self.search_prompt {
             Some(format!("/{}", prompt.query))
         } else if let Some(message) = &self.status_message {
-            Some(message.clone())
+            Some(message.text.clone())
         } else if let Some(message) = &self.search_message {
             Some(message.clone())
         } else if self.focus == PaneFocus::Outline {
@@ -653,7 +769,165 @@ impl ReadingSession {
     }
 
     pub(crate) fn content_height(&self, screen_height: u16) -> u16 {
-        screen_height.saturating_sub(u16::from(self.status_text().is_some()))
+        if self.viewer_chrome() {
+            screen_height.saturating_sub(1)
+        } else {
+            screen_height.saturating_sub(u16::from(self.status_text().is_some()))
+        }
+    }
+
+    pub(crate) fn status_text_for_width(&self, width: u16) -> Option<String> {
+        if self.viewer_chrome() {
+            Some(self.viewer_status_text(width))
+        } else {
+            self.status_text()
+        }
+    }
+
+    pub(crate) fn status_level(&self) -> StatusLevel {
+        if let Some(message) = &self.status_message {
+            message.level
+        } else if self.search_message.is_some() || self.status_warning().is_some() {
+            StatusLevel::Warning
+        } else {
+            StatusLevel::Normal
+        }
+    }
+
+    pub(crate) fn viewer_chrome(&self) -> bool {
+        self.presentation.chrome == ViewerChrome::Full
+    }
+
+    pub(crate) fn color_enabled(&self) -> bool {
+        self.presentation.color_mode == ColorMode::Color
+    }
+
+    pub(crate) fn help_open(&self) -> bool {
+        self.help_open
+    }
+
+    pub(crate) fn terminal_too_small(&self, width: u16, height: u16) -> bool {
+        self.viewer_chrome() && (width < MIN_TERMINAL_WIDTH || height < MIN_TERMINAL_HEIGHT)
+    }
+
+    pub(crate) fn reading_progress(&self) -> usize {
+        let Some(cursor) = self.cursor else {
+            return 0;
+        };
+        let positions = logical_positions(&self.document);
+        let Some(index) = positions.iter().position(|position| *position == cursor) else {
+            return 0;
+        };
+        if positions.len() <= 1 {
+            100
+        } else {
+            index.saturating_mul(100) / positions.len().saturating_sub(1)
+        }
+    }
+
+    pub(crate) fn scrollbar_thumb_row(&self, width: u16, height: u16) -> Option<u16> {
+        let rendered = self.rendered(width);
+        let cursor_row = rendered.cell_for_position(self.cursor()?)?.row;
+        let last_row = rendered.rows().len().saturating_sub(1);
+        let track_end = usize::from(height.saturating_sub(1));
+        let row = cursor_row
+            .saturating_mul(track_end)
+            .checked_div(last_row)
+            .unwrap_or(0);
+        u16::try_from(row).ok()
+    }
+
+    fn viewer_status_text(&self, width: u16) -> String {
+        if let Some(prompt) = &self.search_prompt {
+            let full = format!(
+                "{} │ Search │ /{}",
+                self.presentation.identity, prompt.query
+            );
+            if full.width() <= usize::from(width) {
+                return full;
+            }
+            return compact_status(
+                vec![
+                    CompactStatusField::Flexible(format!("D:{}", self.presentation.identity)),
+                    CompactStatusField::Fixed("Search".to_owned()),
+                    CompactStatusField::Flexible(format!("/{}", prompt.query)),
+                ],
+                width,
+            );
+        }
+
+        let state = if self.help_open {
+            "Help"
+        } else if self.selection.is_some() {
+            "Selection"
+        } else {
+            match self.focus {
+                PaneFocus::Document => "Document",
+                PaneFocus::Outline => "Outline",
+            }
+        };
+        let compact_state = match state {
+            "Document" => "Doc",
+            "Outline" => "Out",
+            "Selection" => "Sel",
+            _ => state,
+        };
+        let mut parts = Vec::new();
+        let mut compact = Vec::new();
+        if let Some(message) = &self.status_message {
+            parts.push(message.text.clone());
+            compact.push(CompactStatusField::Flexible(format!("!{}", message.text)));
+        } else if let Some(message) = &self.search_message {
+            parts.push(message.clone());
+            compact.push(CompactStatusField::Flexible(format!("!{message}")));
+        } else if let Some(warning) = self.status_warning() {
+            parts.push(warning.to_owned());
+            compact.push(CompactStatusField::Flexible(format!("!{warning}")));
+        }
+        if let Some(target) = self.link_target_under_cursor() {
+            parts.push(format!("→ {target}"));
+            compact.push(CompactStatusField::Flexible(format!("→{target}")));
+        }
+        if self.focus == PaneFocus::Outline
+            && let Some(entry) = self
+                .outline_selection
+                .and_then(|selection| self.outline.get(selection))
+            && Some(entry.position) != self.current_section()
+        {
+            parts.push(entry.label.clone());
+            compact.push(CompactStatusField::Flexible(format!("O:{}", entry.label)));
+        }
+        parts.push(self.presentation.identity.clone());
+        compact.push(CompactStatusField::Flexible(format!(
+            "D:{}",
+            self.presentation.identity
+        )));
+        if let Some(section) = self.current_section().and_then(|position| {
+            self.outline
+                .iter()
+                .find(|entry| entry.position == position)
+                .map(|entry| entry.label.clone())
+        }) {
+            compact.push(CompactStatusField::Flexible(format!("S:{section}")));
+            parts.push(section);
+        }
+        let progress = format!("{}%", self.reading_progress());
+        parts.push(progress.clone());
+        parts.push(state.to_owned());
+        let full = parts.join(" │ ");
+        if full.width() <= usize::from(width) {
+            return full;
+        }
+        compact.push(CompactStatusField::Fixed(progress));
+        compact.push(CompactStatusField::Fixed(compact_state.to_owned()));
+        compact_status(compact, width)
+    }
+
+    fn set_status(&mut self, text: impl Into<String>, level: StatusLevel) {
+        self.status_message = Some(StatusMessage {
+            text: text.into(),
+            level,
+        });
     }
 
     pub(crate) fn outline(&self) -> &[OutlineEntry] {
@@ -700,11 +974,12 @@ impl ReadingSession {
     }
 
     pub(crate) fn pane_layout(&self, screen_width: u16) -> PaneLayout {
+        let scrollbar_width = u16::from(self.viewer_chrome());
         if !self.outline_is_visible(screen_width) {
             return PaneLayout {
                 outline_width: 0,
                 document_x: 0,
-                document_width: screen_width,
+                document_width: screen_width.saturating_sub(scrollbar_width).max(1),
             };
         }
 
@@ -715,7 +990,10 @@ impl ReadingSession {
         PaneLayout {
             outline_width,
             document_x,
-            document_width: screen_width.saturating_sub(document_x).max(1),
+            document_width: screen_width
+                .saturating_sub(document_x)
+                .saturating_sub(scrollbar_width)
+                .max(1),
         }
     }
 
@@ -793,7 +1071,7 @@ impl ReadingSession {
         if let Some(fragment) = target.strip_prefix('#') {
             let key = fragment.to_lowercase();
             let Some(destination) = self.fragment_targets.get(&key).copied() else {
-                self.status_message = Some(format!("Target not found: #{fragment}"));
+                self.set_status(format!("Target not found: #{fragment}"), StatusLevel::Error);
                 return;
             };
             if let Some(cursor) = self.cursor {
@@ -808,11 +1086,14 @@ impl ReadingSession {
             return;
         }
 
-        self.status_message = Some(if looks_like_relative_path(target) {
-            "Relative links cannot be opened".to_owned()
-        } else {
-            format!("Unsupported link scheme: {target}")
-        });
+        self.set_status(
+            if looks_like_relative_path(target) {
+                "Relative links cannot be opened".to_owned()
+            } else {
+                format!("Unsupported link scheme: {target}")
+            },
+            StatusLevel::Warning,
+        );
     }
 
     fn traverse_jump_history(&mut self, direction: JumpDirection, width: u16, height: u16) {
@@ -1416,16 +1697,20 @@ fn fragment_targets(document: &Document) -> BTreeMap<String, SemanticPosition> {
             if let Some(target) = span.link_target() {
                 if let Some(label) = target.strip_prefix("#fn-") {
                     let label = label.to_lowercase();
-                    targets.entry(format!("fnref-{label}")).or_insert(SemanticPosition {
-                        block: block_index,
-                        grapheme,
-                    });
+                    targets
+                        .entry(format!("fnref-{label}"))
+                        .or_insert(SemanticPosition {
+                            block: block_index,
+                            grapheme,
+                        });
                 } else if let Some(label) = target.strip_prefix("#fnref-") {
                     let label = label.to_lowercase();
-                    targets.entry(format!("fn-{label}")).or_insert(SemanticPosition {
-                        block: block_index,
-                        grapheme,
-                    });
+                    targets
+                        .entry(format!("fn-{label}"))
+                        .or_insert(SemanticPosition {
+                            block: block_index,
+                            grapheme,
+                        });
                 }
             }
             grapheme += span_graphemes;
@@ -1498,20 +1783,52 @@ fn github_heading_slug(text: &str) -> String {
 }
 
 fn github_slug_keeps(character: char) -> bool {
-    match character {
-        '\u{2000}'..='\u{206F}' | '\u{2E00}'..='\u{2E7F}' => false,
-        '\'' | '!' | '"' | '#' | '$' | '%' | '&' | '(' | ')' | '*' | '+' | ',' | '.' | '/'
-        | ':' | ';' | '<' | '=' | '>' | '?' | '@' | '[' | '\\' | ']' | '^' | '`' | '{' | '|'
-        | '}' | '~' => false,
-        _ => true,
-    }
+    !matches!(
+        character,
+        '\u{2000}'..='\u{206F}'
+            | '\u{2E00}'..='\u{2E7F}'
+            | '\''
+            | '!'
+            | '"'
+            | '#'
+            | '$'
+            | '%'
+            | '&'
+            | '('
+            | ')'
+            | '*'
+            | '+'
+            | ','
+            | '.'
+            | '/'
+            | ':'
+            | ';'
+            | '<'
+            | '='
+            | '>'
+            | '?'
+            | '@'
+            | '['
+            | '\\'
+            | ']'
+            | '^'
+            | '`'
+            | '{'
+            | '|'
+            | '}'
+            | '~'
+    )
 }
 
 fn unique_heading_slug(base: &str, counts: &mut HashMap<String, usize>) -> String {
     let mut slug = base.to_owned();
     let original = base.to_owned();
     while counts.contains_key(&slug) {
-        let next = counts.get(&original).copied().unwrap_or(0).saturating_add(1);
+        let next = counts
+            .get(&original)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
         counts.insert(original.clone(), next);
         slug = format!("{original}-{next}");
     }
@@ -1524,6 +1841,90 @@ fn looks_like_relative_path(target: &str) -> bool {
         || target.starts_with("../")
         || target.starts_with('/')
         || (!target.contains(':') && !target.starts_with('#'))
+}
+
+enum CompactStatusField {
+    Flexible(String),
+    Fixed(String),
+}
+
+fn compact_status(fields: Vec<CompactStatusField>, width: u16) -> String {
+    let separator_width = fields.len().saturating_sub(1);
+    let fixed_width = fields
+        .iter()
+        .filter_map(|field| match field {
+            CompactStatusField::Fixed(text) => Some(text.width()),
+            CompactStatusField::Flexible(_) => None,
+        })
+        .sum::<usize>();
+    let flexible_count = fields
+        .iter()
+        .filter(|field| matches!(field, CompactStatusField::Flexible(_)))
+        .count();
+    let flexible_width = usize::from(width)
+        .saturating_sub(separator_width)
+        .saturating_sub(fixed_width);
+    let shared_width = flexible_width
+        .checked_div(flexible_count)
+        .unwrap_or_default();
+    let mut remainder = flexible_width.saturating_sub(shared_width.saturating_mul(flexible_count));
+
+    fields
+        .into_iter()
+        .map(|field| match field {
+            CompactStatusField::Fixed(text) => text,
+            CompactStatusField::Flexible(text) => {
+                let extra = usize::from(remainder > 0);
+                remainder = remainder.saturating_sub(extra);
+                truncate_display(&text, shared_width.saturating_add(extra))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn truncate_display(text: &str, maximum_width: usize) -> String {
+    if text.width() <= maximum_width {
+        return text.to_owned();
+    }
+    if maximum_width == 0 {
+        return String::new();
+    }
+    let content_width = maximum_width.saturating_sub(1);
+    let mut output = String::new();
+    let mut width = 0_usize;
+    for grapheme in text.graphemes(true) {
+        let grapheme_width = grapheme.width();
+        if width.saturating_add(grapheme_width) > content_width {
+            break;
+        }
+        output.push_str(grapheme);
+        width += grapheme_width;
+    }
+    output.push('…');
+    output
+}
+
+fn document_identity(path: &Path) -> String {
+    let label = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy();
+    inert_label(&label)
+}
+
+fn inert_label(label: &str) -> String {
+    label
+        .chars()
+        .map(|character| match character {
+            '\u{00}'..='\u{1f}' => {
+                char::from_u32(u32::from(character) + 0x2400).expect("control picture exists")
+            }
+            '\u{7f}' => '␡',
+            _ if character.is_control() => '�',
+            _ => character,
+        })
+        .collect()
 }
 
 fn is_web_url(target: &str) -> bool {
@@ -1744,7 +2145,36 @@ pub struct Harness {
 impl Harness {
     #[must_use]
     pub fn new(document: Document, width: u16, height: u16) -> Self {
-        Self::with_session(ReadingSession::new(document), width, height)
+        Self::with_session(
+            ReadingSession::with_highlight_cache(
+                document,
+                None,
+                ViewerPresentation::content_only("standard input", ColorMode::detect()),
+                HighlightCache::syntect(),
+            ),
+            width,
+            height,
+        )
+    }
+
+    #[must_use]
+    pub fn viewer(
+        document: Document,
+        identity: impl Into<String>,
+        width: u16,
+        height: u16,
+        color_mode: ColorMode,
+    ) -> Self {
+        Self::with_session(
+            ReadingSession::with_highlight_cache(
+                document,
+                None,
+                ViewerPresentation::viewer(identity, color_mode),
+                HighlightCache::syntect(),
+            ),
+            width,
+            height,
+        )
     }
 
     #[must_use]
@@ -1758,6 +2188,7 @@ impl Harness {
             ReadingSession::with_highlight_cache(
                 document,
                 None,
+                ViewerPresentation::content_only("standard input", ColorMode::detect()),
                 HighlightCache::with_highlighter(highlighter),
             ),
             width,
@@ -1814,8 +2245,15 @@ impl Harness {
 
     pub fn open(path: impl AsRef<Path>, width: u16, height: u16) -> Result<Self, SourceError> {
         let path = path.as_ref().to_owned();
+        let document = load_document(&path)?;
+        let identity = document_identity(&path);
         Ok(Self::with_session(
-            ReadingSession::with_source(load_document(&path)?, path),
+            ReadingSession::with_highlight_cache(
+                document,
+                Some(path),
+                ViewerPresentation::content_only(identity, ColorMode::detect()),
+                HighlightCache::syntect(),
+            ),
             width,
             height,
         ))
@@ -1828,10 +2266,12 @@ impl Harness {
         highlighter: impl CodeHighlighter,
     ) -> Result<Self, SourceError> {
         let path = path.as_ref().to_owned();
+        let identity = document_identity(&path);
         Ok(Self::with_session(
             ReadingSession::with_highlight_cache(
                 load_document(&path)?,
                 Some(path),
+                ViewerPresentation::content_only(identity, ColorMode::detect()),
                 HighlightCache::with_highlighter(highlighter),
             ),
             width,
@@ -1978,6 +2418,30 @@ impl Harness {
         let column = u16::try_from(location.column).ok()?;
         let row = u16::try_from(location.row).ok()?;
         Some(self.terminal.backend().buffer()[(column, row)].fg)
+    }
+
+    #[must_use]
+    pub fn has_color(&self) -> bool {
+        let buffer = self.terminal.backend().buffer();
+        (0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.fg != Color::Reset || cell.bg != Color::Reset
+            })
+        })
+    }
+
+    #[must_use]
+    pub fn status_line(&self) -> String {
+        self.frame().lines().last().unwrap_or_default().to_owned()
+    }
+
+    #[must_use]
+    pub fn scrollbar_thumb_row(&self) -> Option<u16> {
+        let buffer = self.terminal.backend().buffer();
+        let column = buffer.area.width.checked_sub(1)?;
+        (0..self.session.content_height(buffer.area.height))
+            .find(|row| buffer[(column, *row)].symbol() == "█")
     }
 
     #[must_use]

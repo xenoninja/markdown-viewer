@@ -24,6 +24,13 @@ struct TableBorder {
     right: char,
 }
 
+#[derive(Clone, Copy)]
+struct RowContext<'a> {
+    column: usize,
+    leading: &'a str,
+    alert_kind: Option<AlertKind>,
+}
+
 /// Width-independent location in the semantic Document.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct SemanticPosition {
@@ -185,6 +192,7 @@ pub struct RenderedRow {
     leading: String,
     horizontal_offset: usize,
     block: usize,
+    alert_kind: Option<AlertKind>,
 }
 
 struct CellProjection<'a> {
@@ -236,6 +244,11 @@ impl RenderedRow {
     #[must_use]
     pub fn block(&self) -> usize {
         self.block
+    }
+
+    #[must_use]
+    pub fn alert_kind(&self) -> Option<AlertKind> {
+        self.alert_kind
     }
 
     pub(crate) fn visible_cells(&self) -> impl Iterator<Item = &RenderedCell> {
@@ -451,6 +464,7 @@ pub(crate) fn layout_with_state(
         if block.kind() == BlockKind::ThematicBreak {
             layout_thematic_break(
                 block.kind(),
+                block.alert_kind(),
                 block_index,
                 block_width,
                 base_column,
@@ -504,6 +518,7 @@ fn layout_code(
                     leading: leading.to_owned(),
                     horizontal_offset,
                     block: block_index,
+                    alert_kind: block.alert_kind(),
                 });
                 source_column = 0;
                 ended_with_newline = true;
@@ -538,6 +553,7 @@ fn layout_code(
             leading: leading.to_owned(),
             horizontal_offset,
             block: block_index,
+            alert_kind: block.alert_kind(),
         });
     }
 }
@@ -552,6 +568,11 @@ fn layout_table(
     rows: &mut Vec<RenderedRow>,
 ) {
     let table = block.table().expect("table block has table semantics");
+    let row_context = RowContext {
+        column,
+        leading,
+        alert_kind: block.alert_kind(),
+    };
     let column_count = table
         .rows()
         .iter()
@@ -615,8 +636,7 @@ fn layout_table(
             junction: '┬',
             right: '┐',
         },
-        column,
-        leading,
+        row_context,
         horizontal_offset,
         rows,
     );
@@ -669,10 +689,11 @@ fn layout_table(
             }
             rows.push(RenderedRow {
                 cells,
-                column,
-                leading: leading.to_owned(),
+                column: row_context.column,
+                leading: row_context.leading.to_owned(),
                 horizontal_offset,
                 block: block_index,
+                alert_kind: row_context.alert_kind,
             });
         }
 
@@ -685,8 +706,7 @@ fn layout_table(
                     junction: '┼',
                     right: '┤',
                 },
-                column,
-                leading,
+                row_context,
                 horizontal_offset,
                 rows,
             );
@@ -700,8 +720,7 @@ fn layout_table(
             junction: '┴',
             right: '┘',
         },
-        column,
-        leading,
+        row_context,
         horizontal_offset,
         rows,
     );
@@ -798,8 +817,7 @@ fn push_table_border(
     block: usize,
     column_widths: &[TableColumnWidth],
     border: TableBorder,
-    column: usize,
-    leading: &str,
+    context: RowContext<'_>,
     horizontal_offset: usize,
     rows: &mut Vec<RenderedRow>,
 ) {
@@ -818,10 +836,11 @@ fn push_table_border(
     }
     rows.push(RenderedRow {
         cells,
-        column,
-        leading: leading.to_owned(),
+        column: context.column,
+        leading: context.leading.to_owned(),
         horizontal_offset,
         block,
+        alert_kind: context.alert_kind,
     });
 }
 
@@ -885,6 +904,7 @@ fn list_marker(marker: ListMarker) -> String {
 
 fn layout_thematic_break(
     kind: BlockKind,
+    alert_kind: Option<AlertKind>,
     block: usize,
     width: usize,
     base_column: usize,
@@ -907,6 +927,7 @@ fn layout_thematic_break(
         leading,
         horizontal_offset: 0,
         block,
+        alert_kind,
     });
 }
 
@@ -939,6 +960,7 @@ fn layout_empty_list_item(
         leading,
         horizontal_offset: 0,
         block: block_index,
+        alert_kind: block.alert_kind(),
     });
 }
 
@@ -950,6 +972,11 @@ fn wrap_block(
     leading: &str,
     rows: &mut Vec<RenderedRow>,
 ) {
+    let row_context = RowContext {
+        column,
+        leading,
+        alert_kind: block.alert_kind(),
+    };
     let mut row = Vec::new();
     let mut word = Vec::new();
     let mut separator = None;
@@ -976,11 +1003,10 @@ fn wrap_block(
                     &mut separator,
                     &mut row,
                     width,
-                    column,
-                    leading,
+                    row_context,
                     rows,
                 );
-                push_row_if_populated(&mut row, column, leading, rows);
+                push_row_if_populated(&mut row, row_context, rows);
                 separator = None;
                 continue;
             }
@@ -1000,8 +1026,7 @@ fn wrap_block(
                     &mut separator,
                     &mut row,
                     width,
-                    column,
-                    leading,
+                    row_context,
                     rows,
                 );
                 separator.get_or_insert(cell);
@@ -1016,11 +1041,10 @@ fn wrap_block(
         &mut separator,
         &mut row,
         width,
-        column,
-        leading,
+        row_context,
         rows,
     );
-    push_row_if_populated(&mut row, column, leading, rows);
+    push_row_if_populated(&mut row, row_context, rows);
 }
 
 fn inline_display_text(span: &crate::InlineSpan) -> String {
@@ -1050,8 +1074,7 @@ fn flush_word(
     separator: &mut Option<RenderedCell>,
     row: &mut Vec<RenderedCell>,
     width: usize,
-    column: usize,
-    leading: &str,
+    context: RowContext<'_>,
     rows: &mut Vec<RenderedRow>,
 ) {
     if word.is_empty() {
@@ -1061,7 +1084,7 @@ fn flush_word(
     let word_width = cells_width(word);
     let separator_width = usize::from(!row.is_empty());
     if !row.is_empty() && cells_width(row) + separator_width + word_width > width {
-        push_row_if_populated(row, column, leading, rows);
+        push_row_if_populated(row, context, rows);
     }
 
     if word_width <= width {
@@ -1073,10 +1096,10 @@ fn flush_word(
         }
         row.append(word);
     } else {
-        push_row_if_populated(row, column, leading, rows);
+        push_row_if_populated(row, context, rows);
         for cell in word.drain(..) {
             if !row.is_empty() && cells_width(row) + cell.width > width {
-                push_row_if_populated(row, column, leading, rows);
+                push_row_if_populated(row, context, rows);
             }
             row.push(cell);
         }
@@ -1087,18 +1110,18 @@ fn flush_word(
 
 fn push_row_if_populated(
     row: &mut Vec<RenderedCell>,
-    column: usize,
-    leading: &str,
+    context: RowContext<'_>,
     rows: &mut Vec<RenderedRow>,
 ) {
     if !row.is_empty() {
         let block = row[0].position.block;
         rows.push(RenderedRow {
             cells: std::mem::take(row),
-            column,
-            leading: leading.to_owned(),
+            column: context.column,
+            leading: context.leading.to_owned(),
             horizontal_offset: 0,
             block,
+            alert_kind: context.alert_kind,
         });
     }
 }
