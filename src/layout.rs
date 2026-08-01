@@ -677,7 +677,7 @@ fn layout_block(
         layout_code(
             block,
             block_index,
-            leading_width,
+            base_column + leading_width,
             &leading,
             horizontal_offset,
             &mut rows,
@@ -686,8 +686,8 @@ fn layout_block(
         layout_table(
             block,
             block_index,
-            pane_width.saturating_sub(leading_width).max(1),
-            leading_width,
+            content_width.saturating_sub(leading_width).max(1),
+            base_column + leading_width,
             &leading,
             horizontal_offset,
             &mut rows,

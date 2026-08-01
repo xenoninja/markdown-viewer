@@ -36,6 +36,29 @@ fn prose_uses_a_centered_reading_column_capped_at_one_hundred_columns() {
 }
 
 #[test]
+fn wide_code_and_tables_share_the_centered_reading_column_with_prose() {
+    let document =
+        Document::parse("ordinary text\n\n```text\ncode\n```\n\n| A |\n|---|\n| value |\n");
+
+    let rendered = layout(&document, 120);
+    let first_columns = document
+        .blocks()
+        .iter()
+        .enumerate()
+        .map(|(block, _)| {
+            rendered
+                .rows()
+                .iter()
+                .find(|row| row.block() == block)
+                .expect("each block has a rendered row")
+                .column()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(first_columns, [10, 10, 10]);
+}
+
+#[test]
 fn every_reachable_position_round_trips_in_narrow_and_wide_layouts() {
     let document = Document::parse("alpha e\u{301} 界 👨‍👩‍👧‍👦 omega");
     let wide = layout(&document, 120);
