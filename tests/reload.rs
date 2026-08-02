@@ -5,6 +5,10 @@ use std::thread;
 use std::time::Duration;
 
 use mdview::{CodeHighlighter, Document, Harness, HighlightStyle, SemanticPosition};
+#[cfg(unix)]
+use nix::sys::stat::Mode;
+#[cfg(unix)]
+use nix::unistd::mkfifo;
 use ratatui::style::Modifier;
 use tempfile::tempdir;
 use unicode_segmentation::UnicodeSegmentation;
@@ -167,6 +171,7 @@ fn failed_reload_keeps_the_last_valid_document_visible() {
     assert!(!harness.has_quit());
 }
 
+#[cfg(unix)]
 #[test]
 fn reload_rejects_a_source_that_changes_during_a_partial_write() {
     let directory = tempdir().expect("temporary directory");
@@ -174,12 +179,20 @@ fn reload_rejects_a_source_that_changes_during_a_partial_write() {
     fs::write(&path, "# Stable\n\nLast valid content.\n").expect("write initial Document");
     let mut harness = Harness::open(&path, 64, 5).expect("open Reading Session");
 
-    fs::write(&path, "# Part").expect("write partial replacement");
+    fs::remove_file(&path).expect("replace source with first FIFO");
+    let fifo_mode = Mode::S_IRUSR | Mode::S_IWUSR;
+    mkfifo(&path, fifo_mode).expect("create first FIFO");
     let writer_path = path.clone();
     let writer = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(10));
-        fs::write(writer_path, "# Complete\n\nFinished replacement.\n")
-            .expect("finish replacement");
+        let completed = "# Complete\n\nFinished replacement.\n";
+        fs::write(&writer_path, "# Part").expect("serve partial replacement");
+
+        fs::remove_file(&writer_path).expect("replace source with second FIFO");
+        mkfifo(&writer_path, fifo_mode).expect("create second FIFO");
+        fs::write(&writer_path, completed).expect("serve completed replacement");
+
+        fs::remove_file(&writer_path).expect("replace FIFO with completed source");
+        fs::write(writer_path, completed).expect("write completed source");
     });
     harness.keys("r");
     writer.join().expect("replacement writer");
