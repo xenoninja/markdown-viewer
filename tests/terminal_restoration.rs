@@ -100,7 +100,8 @@ fn assert_session_restores(action: ExitAction, no_color: bool) -> Vec<u8> {
         OFlag::from_bits_truncate(fcntl(&master, FcntlArg::F_GETFL).expect("read PTY flags"));
     fcntl(&master, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).expect("make PTY non-blocking");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let stage_timeout = Duration::from_secs(5);
+    let mut deadline = Instant::now() + stage_timeout;
     let mut output = Vec::new();
     let mut action_finished = false;
     let mut resized = false;
@@ -111,6 +112,7 @@ fn assert_session_restores(action: ExitAction, no_color: bool) -> Vec<u8> {
             ExitAction::Keys(keys) if !action_finished && contains(&output, b"\x1b[?1049h") => {
                 master.write_all(keys).expect("send exit input");
                 action_finished = true;
+                deadline = Instant::now() + stage_timeout;
             }
             ExitAction::ResizeThenQuit
                 if !resized && contains_rendered_text(&output, b"Terminal too small") =>
@@ -134,12 +136,14 @@ fn assert_session_restores(action: ExitAction, no_color: bool) -> Vec<u8> {
                     "deliver resize event"
                 );
                 resized = true;
+                deadline = Instant::now() + stage_timeout;
             }
             ExitAction::ResizeThenQuit
                 if resized && !action_finished && contains_rendered_text(&output, b"paragraph") =>
             {
                 master.write_all(b"q").expect("send quit after resize");
                 action_finished = true;
+                deadline = Instant::now() + stage_timeout;
             }
             _ => {}
         }
