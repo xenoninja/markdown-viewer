@@ -69,15 +69,9 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
                 }
                 if cell.is_navigable() && session.is_selected(cell.position(), frame.area().width) {
                     style = style.add_modifier(Modifier::REVERSED);
-                    if color_enabled {
-                        style = style.bg(Color::DarkGray);
-                    }
                 }
                 if cell.is_navigable() && Some(cell.position()) == cursor {
                     style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
-                    if color_enabled {
-                        style = style.fg(Color::Black).bg(Color::Gray);
-                    }
                 }
                 Span::styled(cell.symbol().to_owned(), style)
             }));

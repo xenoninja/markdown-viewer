@@ -323,6 +323,37 @@ fn monochrome_uses_text_and_modifiers_for_interactive_distinctions() {
 }
 
 #[test]
+fn selection_and_reading_cursor_use_the_terminal_palette() {
+    let mut harness = Harness::viewer(
+        Document::parse("alpha"),
+        "selection.md",
+        48,
+        10,
+        ColorMode::Color,
+    );
+    harness.keys("vl");
+
+    let anchor = SemanticPosition {
+        block: 0,
+        grapheme: 0,
+    };
+    let cursor = SemanticPosition {
+        block: 0,
+        grapheme: 1,
+    };
+
+    for position in [anchor, cursor] {
+        assert_eq!(harness.foreground_at(position), Some(Color::Reset));
+        assert_eq!(harness.background_at(position), Some(Color::Reset));
+        assert!(
+            harness
+                .modifier_at(position)
+                .is_some_and(|modifier| modifier.contains(Modifier::REVERSED))
+        );
+    }
+}
+
+#[test]
 fn terminal_too_small_message_recovers_after_resize() {
     let mut harness = Harness::viewer(
         Document::parse("# Recoverable\n\ncontent\n"),

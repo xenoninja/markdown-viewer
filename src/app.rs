@@ -2467,6 +2467,14 @@ impl Harness {
     }
 
     #[must_use]
+    pub fn background_at(&self, position: SemanticPosition) -> Option<Color> {
+        let location = self.screen_cell(position)?;
+        let column = u16::try_from(location.column).ok()?;
+        let row = u16::try_from(location.row).ok()?;
+        Some(self.terminal.backend().buffer()[(column, row)].bg)
+    }
+
+    #[must_use]
     pub fn has_color(&self) -> bool {
         let buffer = self.terminal.backend().buffer();
         (0..buffer.area.height).any(|y| {
