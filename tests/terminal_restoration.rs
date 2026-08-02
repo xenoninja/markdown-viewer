@@ -5,6 +5,7 @@ mod support;
 use std::fs::{self, File};
 use std::io::Write;
 use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -87,6 +88,19 @@ fn assert_session_restores(action: ExitAction, no_color: bool) -> Vec<u8> {
         command.env("NO_COLOR", "1");
     } else {
         command.env_remove("NO_COLOR");
+    }
+    // Detach from a surrounding terminal (for example, a tmux pane) so crossterm
+    // cannot read its dimensions from an outer /dev/tty and falls back to the
+    // synthetic PTY on standard output.
+    // SAFETY: after fork, the closure only invokes setsid and captures errno; it
+    // does not allocate or acquire locks.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
     let mut child = command
         .stdin(Stdio::from(dup(&pty.slave).expect("duplicate PTY input")))
