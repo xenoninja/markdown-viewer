@@ -67,7 +67,8 @@ pub fn render(frame: &mut Frame<'_>, session: &ReadingSession) {
                         style = style.fg(Color::Yellow);
                     }
                 }
-                if cell.is_navigable() && session.is_selected(cell.position(), frame.area().width) {
+                if !cell.is_decorative() && session.is_selected(cell.position(), frame.area().width)
+                {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
                 if cell.is_navigable() && Some(cell.position()) == cursor {

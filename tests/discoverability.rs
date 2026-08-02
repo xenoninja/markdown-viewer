@@ -354,6 +354,32 @@ fn selection_and_reading_cursor_use_the_terminal_palette() {
 }
 
 #[test]
+fn selection_highlight_covers_spaces_between_words() {
+    let mut harness = Harness::viewer(
+        Document::parse("alpha beta"),
+        "selection.md",
+        48,
+        10,
+        ColorMode::Color,
+    );
+    let start = harness.cursor_cell().expect("selection starts on alpha");
+    harness.keys("vllllll");
+
+    let space = SemanticPosition {
+        block: 0,
+        grapheme: 5,
+    };
+    assert!(harness.selection_contains(space));
+    let space_column = u16::try_from(start.column + 5).expect("space column fits");
+    let row = u16::try_from(start.row).expect("space row fits");
+    assert!(
+        harness
+            .screen_modifier(space_column, row)
+            .is_some_and(|modifier| modifier.contains(Modifier::REVERSED))
+    );
+}
+
+#[test]
 fn terminal_too_small_message_recovers_after_resize() {
     let mut harness = Harness::viewer(
         Document::parse("# Recoverable\n\ncontent\n"),
