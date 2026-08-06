@@ -17,6 +17,7 @@ fn help_overlay_documents_only_the_fixed_grouped_keymap_and_is_dismissible() {
 
     for group in [
         "NAVIGATION",
+        "SCROLLING",
         "OUTLINE",
         "SEARCH",
         "SELECTION",
@@ -26,20 +27,37 @@ fn help_overlay_documents_only_the_fixed_grouped_keymap_and_is_dismissible() {
     ] {
         assert!(help.contains(group), "missing {group} group:\n{help}");
     }
-    for fixed_key in [
-        "gg/G",
-        "Ctrl-w h/l",
-        "n/N",
-        "v/V",
-        "gx Ctrl-o Ctrl-i",
-        "r local Document",
-        "? q Ctrl-c Esc",
+    for shortcut in [
+        "h j k l       Left/down/up/right",
+        "gg / G        Document start/end",
+        "number+motion Repeat motion",
+        "Ctrl-w h/l    Focus outline/doc",
+        "n / N         Next/previous match",
+        "v / V         Characters/rows",
+        "gx            Open link",
+        "Ctrl-o/i      Back/forward",
+        "r             Reload local file",
+        "? / Esc       Close help/cancel",
+        "q / Ctrl-c    Quit",
     ] {
         assert!(
-            help.contains(fixed_key),
-            "missing fixed key {fixed_key}:\n{help}"
+            help.contains(shortcut),
+            "missing explained shortcut {shortcut}:\n{help}"
         );
     }
+    let action_column = |action: &str| {
+        let line = help
+            .lines()
+            .find(|line| line.contains(action))
+            .unwrap_or_else(|| panic!("missing action {action}:\n{help}"));
+        line.find(action).expect("action is present")
+    };
+    assert_eq!(
+        action_column("Left/down/up/right"),
+        action_column("Repeat motion")
+    );
+    assert_eq!(action_column("Open link"), action_column("Back/forward"));
+
     for unsupported in ["edit", "register", "macro", "Tab", ":"] {
         assert!(
             !help.to_lowercase().contains(&unsupported.to_lowercase()),
@@ -48,11 +66,11 @@ fn help_overlay_documents_only_the_fixed_grouped_keymap_and_is_dismissible() {
     }
 
     harness.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(!harness.frame().contains("FIXED INTERACTIONS"));
+    assert!(!harness.frame().contains("KEYBOARD SHORTCUTS"));
 
     harness.keys("?");
     harness.keys("?");
-    assert!(!harness.frame().contains("FIXED INTERACTIONS"));
+    assert!(!harness.frame().contains("KEYBOARD SHORTCUTS"));
 
     harness.resize(40, 10);
     harness.keys("?");
@@ -60,15 +78,15 @@ fn help_overlay_documents_only_the_fixed_grouped_keymap_and_is_dismissible() {
     assert_eq!(
         compact_help,
         "\
-┌ FIXED INTERACTIONS ──────────────────┐
+┌ KEYBOARD SHORTCUTS ──────────────────┐
 │NAVIGATION  h/j/k/l w/b 0/^/$ gg/G    │
 │            {/} count Ctrl-u/d/f/b/e/y│
 │OUTLINE     o Ctrl-w h/l j/k h/l Enter│
-│SEARCH      / n/N Esc                 │
-│SELECTION   v/V y Esc                 │
-│LINKS       gx Ctrl-o Ctrl-i          │
-│RELOAD      r local Document          │
-│APPLICATION ? q Ctrl-c Esc            │
+│SEARCH      / find; n/N next/prev     │
+│SELECTION   v/V start; y copy         │
+│LINKS       gx opens; Ctrl-o/i history│
+│RELOAD      r reload local file       │
+│APPLICATION ?/Esc close q/Ctrl-c quit │
 └──────────────────────────────────────┘"
     );
     for group in [
@@ -88,8 +106,8 @@ fn help_overlay_documents_only_the_fixed_grouped_keymap_and_is_dismissible() {
     for keys in [
         "Ctrl-u/d/f/b/e/y",
         "Ctrl-w h/l j/k h/l Enter",
-        "gx Ctrl-o Ctrl-i",
-        "? q Ctrl-c Esc",
+        "gx opens; Ctrl-o/i history",
+        "?/Esc close q/Ctrl-c quit",
     ] {
         assert!(
             compact_help.contains(keys),

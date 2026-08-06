@@ -382,32 +382,129 @@ fn render_help(frame: &mut Frame<'_>, color_enabled: bool) {
     } else {
         Style::new().add_modifier(Modifier::BOLD)
     };
-    let lines = [
-        ("NAVIGATION", "h/j/k/l w/b 0/^/$ gg/G"),
-        ("", "{/} count Ctrl-u/d/f/b/e/y"),
-        ("OUTLINE", "o Ctrl-w h/l j/k h/l Enter"),
-        ("SEARCH", "/ n/N Esc"),
-        ("SELECTION", "v/V y Esc"),
-        ("LINKS", "gx Ctrl-o Ctrl-i"),
-        ("RELOAD", "r local Document"),
-        ("APPLICATION", "? q Ctrl-c Esc"),
-    ]
-    .into_iter()
-    .map(|(group, keys)| {
-        Line::from(vec![
-            Span::styled(format!("{group:12}"), group_style),
-            Span::raw(keys),
-        ])
-    })
-    .collect::<Vec<_>>();
+    let lines = if area.width >= 74 {
+        expanded_help_lines(group_style)
+    } else {
+        compact_help_lines(group_style)
+    };
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::new()
-                .title(Span::styled(" FIXED INTERACTIONS ", title_style))
+                .title(Span::styled(" KEYBOARD SHORTCUTS ", title_style))
                 .borders(Borders::ALL),
         ),
         area,
     );
+}
+
+fn expanded_help_lines(group_style: Style) -> Vec<Line<'static>> {
+    type HelpEntry = (Option<&'static str>, &'static str, &'static str);
+
+    const LEFT: [HelpEntry; 16] = [
+        (Some("NAVIGATION"), "", ""),
+        (None, "h j k l", "Left/down/up/right"),
+        (None, "w / b", "Next/previous word"),
+        (None, "0 / ^ / $", "Start/text/end"),
+        (None, "gg / G", "Document start/end"),
+        (None, "{ / }", "Prev/next paragraph"),
+        (None, "number+motion", "Repeat motion"),
+        (Some("SCROLLING"), "", ""),
+        (None, "Ctrl-u/d", "Half page up/down"),
+        (None, "Ctrl-b/f", "Page up/down"),
+        (None, "Ctrl-y/e", "View one row up/down"),
+        (Some("SELECTION"), "", ""),
+        (None, "v / V", "Characters/rows"),
+        (None, "y", "Copy selection"),
+        (Some("RELOAD"), "", ""),
+        (None, "r", "Reload local file"),
+    ];
+    const RIGHT: [HelpEntry; 15] = [
+        (Some("OUTLINE"), "", ""),
+        (None, "o", "Show/hide outline"),
+        (None, "Ctrl-w h/l", "Focus outline/doc"),
+        (None, "j / k", "Previous/next item"),
+        (None, "h / l", "Collapse/expand"),
+        (None, "Enter", "Open selected item"),
+        (Some("SEARCH"), "", ""),
+        (None, "/", "Start search"),
+        (None, "n / N", "Next/previous match"),
+        (Some("LINKS"), "", ""),
+        (None, "gx", "Open link"),
+        (None, "Ctrl-o/i", "Back/forward"),
+        (Some("APPLICATION"), "", ""),
+        (None, "? / Esc", "Close help/cancel"),
+        (None, "q / Ctrl-c", "Quit"),
+    ];
+
+    let column_width = 34;
+    (0..LEFT.len().max(RIGHT.len()))
+        .map(|row| {
+            let mut spans = Vec::with_capacity(7);
+            append_help_column(
+                &mut spans,
+                LEFT.get(row).copied(),
+                group_style,
+                column_width,
+            );
+            spans.push(Span::raw(" │ "));
+            append_help_column(
+                &mut spans,
+                RIGHT.get(row).copied(),
+                group_style,
+                column_width,
+            );
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn append_help_column(
+    spans: &mut Vec<Span<'static>>,
+    entry: Option<(Option<&'static str>, &'static str, &'static str)>,
+    group_style: Style,
+    width: usize,
+) {
+    const KEY_WIDTH: usize = 14;
+
+    let Some((group, keys, action)) = entry else {
+        spans.push(Span::raw(" ".repeat(width)));
+        return;
+    };
+    if let Some(group) = group {
+        spans.push(Span::styled(format!("{group:<width$}"), group_style));
+        return;
+    }
+
+    let keys_width = UnicodeWidthStr::width(keys);
+    debug_assert!(keys_width < KEY_WIDTH);
+    spans.push(Span::styled(
+        format!("{keys}{}", " ".repeat(KEY_WIDTH.saturating_sub(keys_width))),
+        Style::new().add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::raw(action));
+    let used_width = KEY_WIDTH + UnicodeWidthStr::width(action);
+    spans.push(Span::raw(" ".repeat(width.saturating_sub(used_width))));
+}
+
+fn compact_help_lines(group_style: Style) -> Vec<Line<'static>> {
+    [
+        ("NAVIGATION", "h/j/k/l w/b 0/^/$ gg/G"),
+        ("", "{/} count Ctrl-u/d/f/b/e/y"),
+        ("OUTLINE", "o Ctrl-w h/l j/k h/l Enter"),
+        ("SEARCH", "/ find; n/N next/prev"),
+        ("SELECTION", "v/V start; y copy"),
+        ("LINKS", "gx opens; Ctrl-o/i history"),
+        ("RELOAD", "r reload local file"),
+        ("APPLICATION", "?/Esc close q/Ctrl-c quit"),
+    ]
+    .into_iter()
+    .map(|(group, help)| {
+        Line::from(vec![
+            Span::styled(format!("{group:12}"), group_style),
+            Span::raw(help),
+        ])
+    })
+    .collect()
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
