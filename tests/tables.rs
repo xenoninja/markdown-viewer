@@ -93,7 +93,7 @@ fn reading_cursor_reveals_wide_tables_with_independent_viewports() {
     assert!(
         both_scrolled
             .lines()
-            .nth(6)
+            .nth(7)
             .expect("second header")
             .contains('Z')
     );

@@ -31,6 +31,7 @@ fn front_matter_is_literal_metadata_and_not_a_heading() {
         [
             "metadata │ title: \"Terminal ␛[2J\"",
             "metadata │ tags: [Rust, 终端]",
+            "",
             "Visible heading",
         ]
     );
@@ -71,9 +72,13 @@ fn github_alerts_have_distinct_text_labels_without_color() {
         rows,
         [
             "NOTE │ NOTE body",
+            "",
             "TIP │ TIP body",
+            "",
             "IMPORTANT │ IMPORTANT body",
+            "",
             "WARNING │ WARNING body",
+            "",
             "CAUTION │ CAUTION body",
         ]
     );
@@ -138,6 +143,7 @@ fn inline_and_block_html_render_literally_with_controls_inert() {
         rows,
         [
             "press <kbd>Ctrl␛</kbd> now",
+            "",
             "<aside>",
             "raw⇥␛]0;owned␇",
             "</aside>",

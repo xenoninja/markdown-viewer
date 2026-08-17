@@ -51,6 +51,42 @@ fn counted_row_motions_follow_visible_wrapped_rows() {
 }
 
 #[test]
+fn counted_row_targets_skip_decorative_spacing() {
+    let document = Document::parse("first\n\nsecond\n\nthird");
+    let mut harness = Harness::new(document, 40, 5);
+
+    harness.keys("2gg");
+    assert_eq!(
+        harness.cursor(),
+        Some(SemanticPosition {
+            block: 1,
+            grapheme: 0,
+        }),
+        "counted document-row motion skips block spacing"
+    );
+
+    harness.keys("gg2$");
+    assert_eq!(
+        harness.cursor(),
+        Some(SemanticPosition {
+            block: 1,
+            grapheme: 5,
+        }),
+        "counted row-end motion skips block spacing"
+    );
+
+    harness.keys("gg2G");
+    assert_eq!(
+        harness.cursor(),
+        Some(SemanticPosition {
+            block: 1,
+            grapheme: 0,
+        }),
+        "counted G motion skips block spacing"
+    );
+}
+
+#[test]
 fn horizontal_motion_crosses_soft_wrap_boundaries() {
     let document = Document::parse("one two three");
     let mut harness = Harness::new(document, 7, 2);
@@ -303,23 +339,23 @@ fn reading_cursor_remains_visible_on_inline_code() {
 #[test]
 fn reading_cursor_reveals_long_code_with_independent_horizontal_viewports() {
     let document = Document::parse("```\nabcdefghijklmnop\n```\n\n```\n0123456789abcdef\n```\n");
-    let mut harness = Harness::new(document, 8, 2);
+    let mut harness = Harness::new(document, 8, 3);
 
-    assert_eq!(harness.frame(), "abcdefgh\n01234567");
+    assert_eq!(harness.frame(), "│ abcdef\n\n│ 012345");
 
     harness.keys("10l");
-    assert_eq!(harness.frame(), "defghijk\n01234567");
+    assert_eq!(harness.frame(), "│ fghijk\n\n│ 012345");
     assert!(harness.cursor_is_highlighted());
 
     harness.keys("j");
     assert_eq!(
         harness.frame(),
-        "defghijk\n01234567",
+        "│ fghijk\n\n│ 012345",
         "moving into another code block leaves both viewports independent"
     );
 
     harness.keys("k");
-    assert_eq!(harness.frame(), "defghijk\n01234567");
+    assert_eq!(harness.frame(), "│ fghijk\n\n│ 012345");
     assert!(harness.cursor_is_highlighted());
 }
 

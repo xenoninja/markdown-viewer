@@ -1174,31 +1174,14 @@ impl ReadingSession {
             Motion::WordForward | Motion::WordBackward => {
                 (word_target(&self.document, cursor, motion, count), None)
             }
-            Motion::RowStart | Motion::FirstNonBlank => {
-                let row = location
-                    .row
-                    .saturating_add(count.saturating_sub(1))
-                    .min(rendered.rows().len().saturating_sub(1));
-                let target = rendered.rows()[row]
-                    .cells()
-                    .iter()
-                    .find(|cell| cell.is_navigable())
-                    .map(|cell| cell.position());
-                (target, None)
-            }
-            Motion::RowEnd => {
-                let row = location
-                    .row
-                    .saturating_add(count.saturating_sub(1))
-                    .min(rendered.rows().len().saturating_sub(1));
-                let target = rendered.rows()[row]
-                    .cells()
-                    .iter()
-                    .rev()
-                    .find(|cell| cell.is_navigable())
-                    .map(|cell| cell.position());
-                (target, None)
-            }
+            Motion::RowStart | Motion::FirstNonBlank => (
+                counted_row_target(&rendered, location.row, count, false),
+                None,
+            ),
+            Motion::RowEnd => (
+                counted_row_target(&rendered, location.row, count, true),
+                None,
+            ),
             Motion::ParagraphBackward | Motion::ParagraphForward => {
                 (paragraph_target(&rendered, cursor, motion, count), None)
             }
@@ -1220,13 +1203,9 @@ impl ReadingSession {
         self.preferred_column = None;
         let rendered = self.rendered(width);
         let cursor = match count {
-            Some(count) if count > 0 && (end || count > 1) => rendered
-                .rows()
-                .get(count.saturating_sub(1))
-                .and_then(|row| row.cells().first())
-                .filter(|cell| cell.is_navigable())
-                .map(|cell| cell.position())
-                .or_else(|| rendered.last_position()),
+            Some(count) if count > 0 && (end || count > 1) => {
+                counted_row_target(&rendered, 0, count, false).or_else(|| rendered.last_position())
+            }
             _ if end => rendered.last_position(),
             _ => rendered.first_position(),
         };
@@ -2041,6 +2020,34 @@ fn vertical_target(
     }
 
     Some(target)
+}
+
+fn counted_row_target(
+    rendered: &RenderedDocument,
+    start_row: usize,
+    count: usize,
+    end: bool,
+) -> Option<SemanticPosition> {
+    rendered
+        .rows()
+        .iter()
+        .skip(start_row)
+        .filter_map(|row| {
+            if end {
+                row.cells()
+                    .iter()
+                    .rev()
+                    .find(|cell| cell.is_navigable())
+                    .map(|cell| cell.position())
+            } else {
+                row.cells()
+                    .iter()
+                    .find(|cell| cell.is_navigable())
+                    .map(|cell| cell.position())
+            }
+        })
+        .take(count)
+        .last()
 }
 
 fn word_target(

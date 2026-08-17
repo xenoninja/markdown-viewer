@@ -52,6 +52,14 @@ fn wraps_paragraphs_at_the_application_viewport() {
 }
 
 #[test]
+fn separates_markdown_blocks_in_the_document_panel() {
+    let document = mdview::Document::parse("First paragraph.\n\nSecond paragraph.");
+    let harness = Harness::new(document, 40, 3);
+
+    assert_eq!(harness.frame(), "First paragraph.\n\nSecond paragraph.");
+}
+
+#[test]
 fn displays_raw_html_literally() {
     let directory = tempdir().expect("temporary directory");
     let path = directory.path().join("html");

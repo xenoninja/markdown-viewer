@@ -76,7 +76,13 @@ impl LayoutCache {
                 cached.width == width && cached.horizontal_offset == horizontal_offset
             });
             if !reusable {
-                self.layout_and_cache_block(block, block_index, width, horizontal_offset);
+                self.layout_and_cache_block(
+                    block,
+                    block_index,
+                    width,
+                    horizontal_offset,
+                    needs_vertical_spacing(document, block_index),
+                );
             }
             rows.extend(
                 self.blocks[block_index]
@@ -111,7 +117,13 @@ impl LayoutCache {
                 .as_ref()
                 .expect("dirty blocks require a cached document")
                 .width;
-            let rows = self.layout_and_cache_block(block, block_index, width, horizontal_offset);
+            let rows = self.layout_and_cache_block(
+                block,
+                block_index,
+                width,
+                horizontal_offset,
+                needs_vertical_spacing(document, block_index),
+            );
             let rendered = &mut self
                 .document
                 .as_mut()
@@ -133,12 +145,14 @@ impl LayoutCache {
         block_index: usize,
         width: u16,
         horizontal_offset: usize,
+        vertical_spacing: bool,
     ) -> Vec<RenderedRow> {
         let rows = layout_block(
             block,
             block_index,
             usize::from(width.max(1)),
             horizontal_offset,
+            vertical_spacing,
         );
         self.blocks[block_index] = Some(CachedBlockLayout {
             width,
@@ -633,6 +647,7 @@ pub(crate) fn layout_with_offsets(
             block_index,
             pane_width,
             horizontal_offset,
+            needs_vertical_spacing(document, block_index),
         ));
     }
 
@@ -662,17 +677,41 @@ fn blocks_with_offsets<'a>(
         })
 }
 
+fn needs_vertical_spacing(document: &Document, block_index: usize) -> bool {
+    let Some(previous_index) = block_index.checked_sub(1) else {
+        return false;
+    };
+    let previous = &document.blocks()[previous_index];
+    let current = &document.blocks()[block_index];
+
+    let consecutive_list_items = previous.list_item().is_some_and(|item| !item.continuation)
+        && current.list_item().is_some_and(|item| !item.continuation);
+    !consecutive_list_items
+}
+
 fn layout_block(
     block: &Block,
     block_index: usize,
     pane_width: usize,
     horizontal_offset: usize,
+    vertical_spacing: bool,
 ) -> Vec<RenderedRow> {
     let content_width = pane_width.min(MAX_PROSE_WIDTH);
     let base_column = pane_width.saturating_sub(content_width) / 2;
     let leading = block_leading(block);
     let leading_width = UnicodeWidthStr::width(leading.as_str());
-    let mut rows = Vec::new();
+    let mut rows = if vertical_spacing {
+        vec![RenderedRow {
+            cells: Vec::new(),
+            column: base_column,
+            leading: String::new(),
+            horizontal_offset: 0,
+            block: block_index,
+            alert_kind: None,
+        }]
+    } else {
+        Vec::new()
+    };
     if matches!(block.kind(), BlockKind::Code | BlockKind::FrontMatter) {
         layout_code(
             block,
@@ -1103,6 +1142,9 @@ fn block_leading(block: &Block) -> String {
         } else {
             leading.push_str(&marker);
         }
+    }
+    if block.kind() == BlockKind::Code {
+        leading.push_str("│ ");
     }
     leading
 }

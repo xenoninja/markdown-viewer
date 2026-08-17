@@ -36,6 +36,33 @@ fn prose_uses_a_centered_reading_column_capped_at_one_hundred_columns() {
 }
 
 #[test]
+fn separate_prose_blocks_have_vertical_breathing_room() {
+    let document = Document::parse(
+        "First paragraph with enough text to establish a prose block.\n\nSecond paragraph.",
+    );
+
+    let rendered = layout(&document, 80);
+    let rows = rendered
+        .rows()
+        .iter()
+        .map(mdview::RenderedRow::text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        [
+            "First paragraph with enough text to establish a prose block.",
+            "",
+            "Second paragraph.",
+        ]
+    );
+    assert!(
+        rendered.rows()[1].cells().is_empty(),
+        "vertical spacing is decorative"
+    );
+}
+
+#[test]
 fn wide_code_and_tables_share_the_centered_reading_column_with_prose() {
     let document =
         Document::parse("ordinary text\n\n```text\ncode\n```\n\n| A |\n|---|\n| value |\n");
@@ -110,33 +137,39 @@ fn common_github_markdown_has_semantic_terminal_layout() {
         rows,
         [
             "One",
+            "",
             "Three",
+            "",
             "Six",
+            "",
             "│ quoted code and link",
+            "",
             "────────",
+            "",
             "• item",
             "  • nested",
+            "",
             "soft",
             "hard",
         ]
     );
 
     let one = rendered.rows()[0].cells()[0].style();
-    let three = rendered.rows()[1].cells()[0].style();
-    let six = rendered.rows()[2].cells()[0].style();
+    let three = rendered.rows()[2].cells()[0].style();
+    let six = rendered.rows()[4].cells()[0].style();
     assert_eq!(one.heading_level(), Some(HeadingLevel::H1));
     assert_eq!(three.heading_level(), Some(HeadingLevel::H3));
     assert_eq!(six.heading_level(), Some(HeadingLevel::H6));
     assert_ne!(one, three);
     assert_ne!(three, six);
 
-    let code = rendered.rows()[3]
+    let code = rendered.rows()[6]
         .cells()
         .iter()
         .find(|cell| cell.symbol() == "c")
         .expect("inline code cell");
     assert!(code.style().is_inline_code());
-    let link = rendered.rows()[3]
+    let link = rendered.rows()[6]
         .cells()
         .iter()
         .rev()
@@ -180,7 +213,8 @@ fn common_markdown_meaning_and_cursor_mappings_survive_reflow() {
 
 #[test]
 fn list_continuation_and_thematic_decorations_are_not_cursor_cells() {
-    let document = Document::parse("- first paragraph\n\n  continuation paragraph\n\n---\n");
+    let document =
+        Document::parse("- first paragraph\n\n  continuation paragraph\n\n- second item\n\n---\n");
     let rendered = layout(&document, 40);
     let rows = rendered
         .rows()
@@ -190,15 +224,23 @@ fn list_continuation_and_thematic_decorations_are_not_cursor_cells() {
 
     assert_eq!(
         rows,
-        ["• first paragraph", "  continuation paragraph", "────────",]
+        [
+            "• first paragraph",
+            "",
+            "  continuation paragraph",
+            "",
+            "• second item",
+            "",
+            "────────",
+        ]
     );
 
-    let rule = &rendered.rows()[2];
+    let rule = &rendered.rows()[6];
     assert_eq!(rule.cells().len(), 1, "one semantic thematic-break anchor");
     assert!(rule.cells()[0].is_navigable());
     for column in 0..rule.column() {
         assert_eq!(
-            rendered.position_at(2, column),
+            rendered.position_at(6, column),
             None,
             "thematic decoration cannot receive the Reading Cursor"
         );
@@ -243,7 +285,7 @@ fn code_keeps_lines_unwrapped_and_expands_tabs_at_four_column_stops() {
         .map(mdview::RenderedRow::text)
         .collect::<Vec<_>>();
 
-    assert_eq!(rows, ["    let value = \"界界界\";", "a   b"]);
+    assert_eq!(rows, ["│     let value = \"界界界\";", "│ a   b"]);
     assert!(
         rendered.rows()[0].display_width() > 8,
         "a long source line overflows instead of soft-wrapping"
@@ -254,6 +296,13 @@ fn code_keeps_lines_unwrapped_and_expands_tabs_at_four_column_stops() {
         .expect("tab is one semantic cell");
     assert_eq!(tab.symbol(), "    ");
     assert_eq!(tab.position().grapheme, 0);
+    for column in 0..rendered.rows()[0].column() {
+        assert_eq!(
+            rendered.position_at(0, column),
+            None,
+            "code rail cannot receive the Reading Cursor"
+        );
+    }
 }
 
 fn reachable_positions(rendered: &mdview::RenderedDocument) -> BTreeSet<SemanticPosition> {

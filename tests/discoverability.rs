@@ -428,8 +428,8 @@ fn terminal_too_small_message_recovers_after_resize() {
         recovered,
         concat!(
             "  Recoverable       │Recoverable                           █\n",
-            "                    │content                               │\n",
             "                    │                                      │\n",
+            "                    │content                               │\n",
             "                    │                                      │\n",
             "                    │                                      │\n",
             "                    │                                      │\n",
