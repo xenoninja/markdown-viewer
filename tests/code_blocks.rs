@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use mdview::{CodeHighlighter, Document, Harness, HighlightStyle, SemanticPosition};
+use mdviewer::{CodeHighlighter, Document, Harness, HighlightStyle, SemanticPosition};
 use ratatui::style::Color;
 
 #[test]

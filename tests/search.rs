@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use mdview::{Document, Harness, PaneFocus, SemanticPosition};
+use mdviewer::{Document, Harness, PaneFocus, SemanticPosition};
 use ratatui::style::Modifier;
 
 #[test]

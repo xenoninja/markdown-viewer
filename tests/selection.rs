@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use mdview::{ClipboardResult, Document, Effect, Harness, SelectionMode, SemanticPosition};
+use mdviewer::{ClipboardResult, Document, Effect, Harness, SelectionMode, SemanticPosition};
 
 #[test]
 fn characterwise_and_row_selection_start_from_the_reading_cursor() {

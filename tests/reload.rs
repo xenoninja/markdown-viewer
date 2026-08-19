@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use mdview::{CodeHighlighter, Document, Harness, HighlightStyle, SemanticPosition};
+use mdviewer::{CodeHighlighter, Document, Harness, HighlightStyle, SemanticPosition};
 #[cfg(unix)]
 use nix::sys::stat::Mode;
 #[cfg(unix)]

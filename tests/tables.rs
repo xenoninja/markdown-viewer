@@ -1,4 +1,4 @@
-use mdview::{Document, Harness, SemanticPosition, layout};
+use mdviewer::{Document, Harness, SemanticPosition, layout};
 
 #[test]
 fn aligned_table_renders_as_a_grid_with_inline_semantics() {
@@ -123,7 +123,7 @@ fn unicode_and_multiline_cells_keep_grid_alignment() {
     let rows = rendered
         .rows()
         .iter()
-        .map(mdview::RenderedRow::text)
+        .map(mdviewer::RenderedRow::text)
         .collect::<Vec<_>>();
 
     assert_eq!(
@@ -160,7 +160,7 @@ fn empty_and_uneven_rows_degrade_safely_in_very_narrow_panes() {
     let rows = layout(&document, 20)
         .rows()
         .iter()
-        .map(mdview::RenderedRow::text)
+        .map(mdviewer::RenderedRow::text)
         .collect::<Vec<_>>();
 
     assert_eq!(
@@ -189,7 +189,7 @@ fn a_narrow_column_never_splits_a_wide_grapheme() {
     let widths = rendered
         .rows()
         .iter()
-        .map(mdview::RenderedRow::display_width)
+        .map(mdviewer::RenderedRow::display_width)
         .collect::<Vec<_>>();
 
     assert!(
@@ -205,7 +205,7 @@ fn tables_retain_enclosing_quote_and_list_context() {
     let tables = document
         .blocks()
         .iter()
-        .filter(|block| block.kind() == mdview::BlockKind::Table)
+        .filter(|block| block.kind() == mdviewer::BlockKind::Table)
         .collect::<Vec<_>>();
 
     assert_eq!(tables.len(), 2);
@@ -215,7 +215,7 @@ fn tables_retain_enclosing_quote_and_list_context() {
     let rows = layout(&document, 30)
         .rows()
         .iter()
-        .map(mdview::RenderedRow::text)
+        .map(mdviewer::RenderedRow::text)
         .collect::<Vec<_>>();
     assert!(rows.iter().any(|row| row.starts_with("│ ┌")));
     assert!(rows.iter().any(|row| row.starts_with("• ┌")));

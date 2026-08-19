@@ -1,4 +1,4 @@
-use mdview::{AlertKind, BlockKind, Document, layout};
+use mdviewer::{AlertKind, BlockKind, Document, layout};
 
 #[test]
 fn front_matter_is_literal_metadata_and_not_a_heading() {
@@ -18,13 +18,13 @@ fn front_matter_is_literal_metadata_and_not_a_heading() {
     );
     assert_eq!(
         document.blocks()[1].kind(),
-        BlockKind::Heading(mdview::HeadingLevel::H1)
+        BlockKind::Heading(mdviewer::HeadingLevel::H1)
     );
 
     let rows = layout(&document, 48)
         .rows()
         .iter()
-        .map(mdview::RenderedRow::text)
+        .map(mdviewer::RenderedRow::text)
         .collect::<Vec<_>>();
     assert_eq!(
         rows,
@@ -66,7 +66,7 @@ fn github_alerts_have_distinct_text_labels_without_color() {
     let rows = layout(&document, 48)
         .rows()
         .iter()
-        .map(mdview::RenderedRow::text)
+        .map(mdviewer::RenderedRow::text)
         .collect::<Vec<_>>();
     assert_eq!(
         rows,
@@ -96,7 +96,7 @@ fn images_are_inert_placeholders_with_alt_text_and_target() {
     let image = block
         .spans()
         .iter()
-        .find_map(mdview::InlineSpan::image)
+        .find_map(mdviewer::InlineSpan::image)
         .expect("image placeholder span");
     assert_eq!(image.alt_text(), "diagram ␛");
     assert_eq!(image.target(), "https://example.com/diagram.svg");
@@ -105,7 +105,7 @@ fn images_are_inert_placeholders_with_alt_text_and_target() {
     let rows = layout(&document, 80)
         .rows()
         .iter()
-        .map(mdview::RenderedRow::text)
+        .map(mdviewer::RenderedRow::text)
         .collect::<Vec<_>>();
     assert_eq!(
         rows,
@@ -137,7 +137,7 @@ fn inline_and_block_html_render_literally_with_controls_inert() {
     let rows = layout(&document, 48)
         .rows()
         .iter()
-        .map(mdview::RenderedRow::text)
+        .map(mdviewer::RenderedRow::text)
         .collect::<Vec<_>>();
     assert_eq!(
         rows,
@@ -171,7 +171,7 @@ fn malformed_and_control_heavy_constructs_stay_visible_and_safe() {
         let visible = rendered
             .rows()
             .iter()
-            .map(mdview::RenderedRow::text)
+            .map(mdviewer::RenderedRow::text)
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -208,7 +208,7 @@ fn alerts_keep_their_role_for_immediately_finished_thematic_breaks() {
     let rows = layout(&document, 40)
         .rows()
         .iter()
-        .map(mdview::RenderedRow::text)
+        .map(mdviewer::RenderedRow::text)
         .collect::<Vec<_>>();
     assert_eq!(rows, ["WARNING │ ────────"]);
 }

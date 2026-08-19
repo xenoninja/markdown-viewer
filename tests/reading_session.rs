@@ -1,6 +1,6 @@
 use std::fs;
 
-use mdview::{Command, Harness};
+use mdviewer::{Command, Harness};
 use tempfile::tempdir;
 
 #[test]
@@ -53,7 +53,7 @@ fn wraps_paragraphs_at_the_application_viewport() {
 
 #[test]
 fn separates_markdown_blocks_in_the_document_panel() {
-    let document = mdview::Document::parse("First paragraph.\n\nSecond paragraph.");
+    let document = mdviewer::Document::parse("First paragraph.\n\nSecond paragraph.");
     let harness = Harness::new(document, 40, 3);
 
     assert_eq!(harness.frame(), "First paragraph.\n\nSecond paragraph.");
@@ -87,7 +87,7 @@ fn invalid_utf8_is_visible_and_reported_without_blocking_reading() {
 
 #[test]
 fn reads_common_github_markdown_as_a_rendered_document() {
-    let document = mdview::Document::parse(
+    let document = mdviewer::Document::parse(
         "## Title\n\nPlain *emphasis*, **strong**, and ~~old~~.\n\n> Use `cargo test` and [read more](https://example.com).\n\n- item\n  - [x] done\n\n---\n",
     );
     let harness = Harness::new(document, 48, 12);

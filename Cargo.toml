@@ -1,14 +1,19 @@
 [package]
-name = "mdview"
+name = "mdviewer"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.88"
 description = "A read-only terminal Markdown viewer"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/xenoninja/markdown-viewer"
 keywords = ["cli", "markdown", "terminal", "tui", "viewer"]
 categories = ["command-line-utilities", "text-processing"]
-include = ["Cargo.toml", "Cargo.lock", "README.md", "src/**", "tests/**"]
+include = ["Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "src/**", "tests/**"]
+
+[[bin]]
+name = "mdview"
+path = "src/main.rs"
 
 [dependencies]
 crossterm = { version = "0.29.0", features = ["use-dev-tty"] }

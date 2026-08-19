@@ -20,12 +20,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CommandLineAction::Version => println!("mdview {}", env!("CARGO_PKG_VERSION")),
         CommandLineAction::Path(path) => {
             let path = std::path::PathBuf::from(path);
-            let document = mdview::load_document(&path)?;
-            mdview::run_file_backed_reading_session(document, path)?;
+            let document = mdviewer::load_document(&path)?;
+            mdviewer::run_file_backed_reading_session(document, path)?;
         }
         CommandLineAction::StandardInput => {
-            let document = mdview::load_standard_input()?;
-            mdview::run_reading_session(document)?;
+            let document = mdviewer::load_standard_input()?;
+            mdviewer::run_reading_session(document)?;
         }
     }
     Ok(())

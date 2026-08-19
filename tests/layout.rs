@@ -1,4 +1,4 @@
-use mdview::{Document, HeadingLevel, SemanticPosition, layout};
+use mdviewer::{Document, HeadingLevel, SemanticPosition, layout};
 use std::collections::BTreeSet;
 
 #[test]
@@ -45,7 +45,7 @@ fn separate_prose_blocks_have_vertical_breathing_room() {
     let rows = rendered
         .rows()
         .iter()
-        .map(mdview::RenderedRow::text)
+        .map(mdviewer::RenderedRow::text)
         .collect::<Vec<_>>();
 
     assert_eq!(
@@ -130,7 +130,7 @@ fn common_github_markdown_has_semantic_terminal_layout() {
     let rows = rendered
         .rows()
         .iter()
-        .map(mdview::RenderedRow::text)
+        .map(mdviewer::RenderedRow::text)
         .collect::<Vec<_>>();
 
     assert_eq!(
@@ -219,7 +219,7 @@ fn list_continuation_and_thematic_decorations_are_not_cursor_cells() {
     let rows = rendered
         .rows()
         .iter()
-        .map(mdview::RenderedRow::text)
+        .map(mdviewer::RenderedRow::text)
         .collect::<Vec<_>>();
 
     assert_eq!(
@@ -254,7 +254,7 @@ fn supported_blocks_inside_lists_keep_layout_hierarchy() {
     let rows = rendered
         .rows()
         .iter()
-        .map(mdview::RenderedRow::text)
+        .map(mdviewer::RenderedRow::text)
         .collect::<Vec<_>>();
 
     assert_eq!(rows, ["• Nested heading", "• ────────", "•", "  • child",]);
@@ -282,7 +282,7 @@ fn code_keeps_lines_unwrapped_and_expands_tabs_at_four_column_stops() {
     let rows = rendered
         .rows()
         .iter()
-        .map(mdview::RenderedRow::text)
+        .map(mdviewer::RenderedRow::text)
         .collect::<Vec<_>>();
 
     assert_eq!(rows, ["│     let value = \"界界界\";", "│ a   b"]);
@@ -305,7 +305,7 @@ fn code_keeps_lines_unwrapped_and_expands_tabs_at_four_column_stops() {
     }
 }
 
-fn reachable_positions(rendered: &mdview::RenderedDocument) -> BTreeSet<SemanticPosition> {
+fn reachable_positions(rendered: &mdviewer::RenderedDocument) -> BTreeSet<SemanticPosition> {
     rendered
         .rows()
         .iter()

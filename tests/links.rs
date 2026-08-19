@@ -1,4 +1,4 @@
-use mdview::{
+use mdviewer::{
     BlockKind, BrowserResult, Document, Effect, Harness, PaneFocus, SemanticPosition, layout,
 };
 use ratatui::style::Modifier;
@@ -186,7 +186,7 @@ fn footnotes_render_and_gx_jumps_with_history() {
     assert!(definition.text().contains("First definition."));
     assert_ne!(
         definition.kind(),
-        BlockKind::Heading(mdview::HeadingLevel::H1)
+        BlockKind::Heading(mdviewer::HeadingLevel::H1)
     );
 
     let mut harness = Harness::new(document, 48, 10);

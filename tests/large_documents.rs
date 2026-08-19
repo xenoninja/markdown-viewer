@@ -1,7 +1,7 @@
 use std::sync::mpsc;
 
-use mdview::{CodeHighlighter, HighlightStyle};
-use mdview::{Document, DocumentWarning, Harness};
+use mdviewer::{CodeHighlighter, HighlightStyle};
+use mdviewer::{Document, DocumentWarning, Harness};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_segmentation::UnicodeSegmentation;
 

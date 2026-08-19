@@ -1,4 +1,4 @@
-use mdview::{BlockKind, Document, HeadingLevel, ListItem, ListMarker};
+use mdviewer::{BlockKind, Document, HeadingLevel, ListItem, ListMarker};
 
 #[test]
 fn headings_and_inline_formatting_keep_meaning_without_authoring_markers() {
@@ -163,12 +163,12 @@ fn controls_are_inert_inside_every_supported_textual_construct() {
         let text = document
             .blocks()
             .iter()
-            .map(mdview::Block::text)
+            .map(mdviewer::Block::text)
             .collect::<String>();
         assert!(!text.chars().any(char::is_control), "{markdown:?}");
         assert!(text.contains('␛'), "{markdown:?}");
 
-        for span in document.blocks().iter().flat_map(mdview::Block::spans) {
+        for span in document.blocks().iter().flat_map(mdviewer::Block::spans) {
             assert!(
                 span.link_target()
                     .is_none_or(|target| !target.chars().any(char::is_control)),

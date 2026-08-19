@@ -1,7 +1,7 @@
 use ratatui::style::Modifier;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use mdview::{Document, Harness, PaneFocus, SemanticPosition};
+use mdviewer::{Document, Harness, PaneFocus, SemanticPosition};
 
 #[test]
 fn outline_shows_declared_hierarchy_without_claiming_pre_heading_content() {

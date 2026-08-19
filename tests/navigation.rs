@@ -1,4 +1,4 @@
-use mdview::{Document, Harness, SemanticPosition, layout};
+use mdviewer::{Document, Harness, SemanticPosition, layout};
 
 #[test]
 fn reading_cursor_is_visible_and_moves_by_unicode_grapheme() {
