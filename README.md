@@ -1,6 +1,7 @@
 # mdview
 
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
+[![crates.io](https://img.shields.io/crates/v/mdviewer.svg)](https://crates.io/crates/mdviewer)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 
 Read Markdown without leaving your terminal.
