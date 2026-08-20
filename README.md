@@ -27,13 +27,19 @@ navigation, text selection, syntax highlighting, and link following.
 
 ## Installation
 
-`mdview` requires Rust 1.88 or later and supports macOS and Linux.
+`mdview` supports macOS and Linux. Building from source requires Rust 1.88
+or later.
 
 Install from [crates.io](https://crates.io/crates/mdviewer):
 
 ```console
 cargo install mdviewer --locked
 ```
+
+Or download a prebuilt binary from
+[GitHub Releases](https://github.com/xenoninja/markdown-viewer/releases).
+Archives are named `mdview-$VERSION-$TARGET.tar.gz` for Linux (musl) and
+macOS.
 
 Or install directly from this repository:
 

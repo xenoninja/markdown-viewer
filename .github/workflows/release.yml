@@ -1,0 +1,116 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  create-release:
+    name: create-release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record the release version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Check that tag version and Cargo.toml version are the same
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if ! grep -q "^version = \"$VERSION\"" Cargo.toml; then
+            echo "version does not match Cargo.toml" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: gh release create "$VERSION" --draft --verify-tag --title "$VERSION"
+
+  build-release:
+    name: build-release / ${{ matrix.target }}
+    needs: [create-release]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl tools
+        if: contains(matrix.target, '-linux-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Select stable Rust
+        run: rustup default stable
+
+      - name: Add the release target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Pack the release archive
+        env:
+          VERSION: ${{ needs.create-release.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          bin="target/${TARGET}/release/mdview"
+          test -x "$bin"
+          archive="mdview-${VERSION}-${TARGET}"
+          mkdir "$archive"
+          cp "$bin" README.md LICENSE "$archive"/
+          tar czf "${archive}.tar.gz" "$archive"
+          shasum -a 256 "${archive}.tar.gz" > "${archive}.tar.gz.sha256"
+          echo "BIN=${bin}" >> "$GITHUB_ENV"
+          echo "ASSET=${archive}.tar.gz" >> "$GITHUB_ENV"
+          echo "ASSET_SUM=${archive}.tar.gz.sha256" >> "$GITHUB_ENV"
+
+      - name: Verify the release binary
+        if: matrix.target != 'x86_64-apple-darwin'
+        env:
+          VERSION: ${{ needs.create-release.outputs.version }}
+        run: |
+          output="$("$BIN" --version)"
+          echo "$output"
+          echo "$output" | grep -F "mdview ${VERSION}"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ env.ASSET }}
+
+      - name: Upload release archive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+        run: gh release upload "$VERSION" "$ASSET" "$ASSET_SUM"
